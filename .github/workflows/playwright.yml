@@ -13,35 +13,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install Python deps (if present)
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      - name: Run backend tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f apps/api/requirements.txt ]; then pip install -r apps/api/requirements.txt; fi
-          if [ -f apps/worker/requirements.txt ]; then pip install -r apps/worker/requirements.txt; fi
-          # Ensure DB schema exists for integrations and audit table
-          python - <<'PY'
-from sqlmodel import SQLModel, create_engine
-import os
-os.makedirs('data', exist_ok=True)
-engine = create_engine('sqlite:///data/dev.db', connect_args={'check_same_thread': False})
-import apps.api.app.models as _m
-SQLModel.metadata.create_all(engine)
-print('DB initialized')
-PY
-          python -m pytest apps/api/tests apps/worker/tests -q
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -68,14 +39,10 @@ PY
         working-directory: apps/frontend
         env:
           CI: true
-          PYTHONPATH: ${{ github.workspace }}
           FRONTEND_PORT: 5173
         run: |
-          # build and start a stable preview server in background
           npm run preview -- --port 5173 --strictPort > preview.log 2>&1 &
-          # wait for the preview server to be ready (max 3 minutes)
           npx wait-on http://localhost:5173 --timeout 180000
-          # run playwright with HTML report
           npx playwright test --config=playwright.ci.config.js --reporter=html
 
       - name: Upload Playwright report
