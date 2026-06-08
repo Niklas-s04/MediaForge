@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -28,7 +28,7 @@ def test_download_job_output_returns_file_response(monkeypatch, tmp_path: Path):
         session.commit()
         session.refresh(job)
 
-        response = download_job_output(job.id, username="tester", session=session)
+        response = download_job_output(job.id, session=session)
 
     assert response.path == str(output_file)
     assert response.filename == "result.mp3"
@@ -44,6 +44,7 @@ def test_download_job_output_rejects_unfinished_job(tmp_path: Path):
         session.refresh(job)
 
         with pytest.raises(HTTPException) as exc:
-            download_job_output(job.id, username="tester", session=session)
+            download_job_output(job.id, session=session)
 
     assert exc.value.status_code == 409
+

@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session
-from apps.api.app.models import User, Job
+from apps.api.app.models import Job
 from apps.api.app import crud
 
 
@@ -7,16 +7,6 @@ def create_test_engine():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
     return engine
-
-
-def test_create_and_get_user():
-    engine = create_test_engine()
-    with Session(engine) as session:
-        user = crud.create_user(session, 'testuser', 'hashedpw', is_admin=False)
-        assert user.username == 'testuser'
-        fetched = crud.get_user_by_username(session, 'testuser')
-        assert fetched is not None
-        assert fetched.username == 'testuser'
 
 
 def test_create_job_and_update_status():

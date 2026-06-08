@@ -4,13 +4,6 @@ from sqlalchemy import Column, JSON
 from datetime import datetime
 
 
-class User(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    username: str = Field(index=True, unique=True)
-    hashed_password: str
-    is_admin: bool = Field(default=False)
-
-
 class Job(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     type: str
@@ -23,7 +16,6 @@ class Job(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
-    user_id: Optional[int] = None
 
 
 class Flow(SQLModel, table=True):

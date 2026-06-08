@@ -4,7 +4,7 @@ MediaForge is a small self-hosted media download and conversion hub.
 
 It includes:
 
-- FastAPI backend with Basic Auth, jobs, flows and SSE log streaming
+- FastAPI backend with jobs, flows and SSE log streaming
 - Celery worker for downloads and ffmpeg conversion
 - React/Vite frontend served by the API container
 - Redis as the task broker
@@ -18,7 +18,7 @@ It includes:
 
 ## Quick Start With Docker
 
-Copy the example environment file and change the password:
+Copy the example environment file:
 
 ```powershell
 Copy-Item .env.example .env
@@ -42,8 +42,6 @@ Health check:
 Invoke-RestMethod http://localhost:8787/health
 ```
 
-The default Compose login is `admin` / `change-me`. Change `ADMIN_PASSWORD` in `.env` before using the app outside local testing.
-
 ## Configuration
 
 Important environment variables:
@@ -51,12 +49,12 @@ Important environment variables:
 ```text
 API_PORT=8787
 TZ=Europe/Berlin
-ADMIN_USER=admin
-ADMIN_PASSWORD=change-me
 WORKER_CONCURRENCY=2
 DATABASE_URL=sqlite:////data/db.sqlite3
 REDIS_URL=redis://redis:6379/0
 DATA_LOG_DIR=/data/logs
+DATA_UPLOAD_DIR=/data/uploads
+MAX_UPLOAD_BYTES=2147483648
 ```
 
 Runtime files are stored in `data/` locally and mounted as `/data` inside the containers. This directory is ignored by Git.

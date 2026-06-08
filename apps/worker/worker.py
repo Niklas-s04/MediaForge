@@ -18,6 +18,37 @@ redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 celery_app = Celery("worker", broker=redis_url, backend=redis_url)
 
 
+DEFAULT_FORMATS = {
+    "audio": "mp3",
+    "video": "mp4",
+    "image": "webp",
+}
+FORMAT_CODECS = {
+    "audio": {
+        "mp3": {"codec": "libmp3lame", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
+        "m4a": {"codec": "aac", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
+        "opus": {"codec": "libopus", "bitrate": {"high": "192k", "balanced": "128k", "small": "80k"}},
+        "wav": {"codec": "pcm_s16le"},
+        "flac": {"codec": "flac"},
+    },
+    "video": {
+        "mp4": {"video_codec": "libx264", "audio_codec": "aac"},
+        "webm": {"video_codec": "libvpx-vp9", "audio_codec": "libopus"},
+        "mkv": {"video_codec": "libx264", "audio_codec": "aac"},
+    },
+}
+VIDEO_QUALITY = {
+    "high": {"crf": 20, "max_width": None, "max_fps": None},
+    "balanced": {"crf": 24, "max_width": 1920, "max_fps": 30},
+    "small": {"crf": 30, "max_width": 1280, "max_fps": 24},
+}
+IMAGE_QUALITY = {
+    "high": {"quality": 92, "jpeg_q": 2, "png_level": 3, "max_width": None},
+    "balanced": {"quality": 82, "jpeg_q": 4, "png_level": 6, "max_width": 1920},
+    "small": {"quality": 70, "jpeg_q": 8, "png_level": 9, "max_width": 1280},
+}
+
+
 @celery_app.task(bind=True, name="worker.echo")
 def echo(self, message: str):
     return {"echo": message}
@@ -91,6 +122,156 @@ def _profile_output_ext(family: str | None, profile: dict) -> str:
     return str(profile.get("container") or "mp3").lstrip(".")
 
 
+def _clean_choice(value: str | None, allowed: set[str], fallback: str) -> str:
+    cleaned = str(value or fallback).lower().lstrip(".")
+    return cleaned if cleaned in allowed else fallback
+
+
+def _quality_preset(input_obj: dict) -> str:
+    return _clean_choice(
+        input_obj.get("quality_preset") or input_obj.get("compression_profile"),
+        {"high", "balanced", "small"},
+        "balanced",
+    )
+
+
+def _int_option(value, default=None, minimum=None, maximum=None):
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    if minimum is not None and parsed < minimum:
+        return default
+    if maximum is not None and parsed > maximum:
+        return default
+    return parsed
+
+
+def _choice_option(value, allowed: set[str], default: str):
+    cleaned = str(value or "").lower()
+    return cleaned if cleaned in allowed else default
+
+
+def _download_format_selector(kind: str, download_quality: str | None) -> str:
+    if kind == "audio":
+        return "bestaudio/best"
+
+    quality = _clean_choice(download_quality, {"best", "1080p", "720p", "480p", "360p"}, "best")
+    if quality == "best":
+        return "bestvideo+bestaudio/best"
+    max_height = quality.removesuffix("p")
+    return f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
+
+
+def _image_filter(quality: str) -> list[str]:
+    settings = IMAGE_QUALITY[quality]
+    max_width = settings.get("max_width")
+    if not max_width:
+        return []
+    return [
+        "-vf",
+        f"scale=w='min({int(max_width)},iw)':h='min({int(max_width)},ih)':force_original_aspect_ratio=decrease",
+    ]
+
+
+def _build_media_command(
+    input_path: str,
+    output_path: str,
+    family: str,
+    output_format: str,
+    quality: str,
+    strip_metadata: bool,
+    options: dict | None = None,
+):
+    options = options or {}
+    cmd = ["ffmpeg", "-y", "-i", input_path]
+
+    if family == "audio":
+        format_config = FORMAT_CODECS["audio"].get(output_format) or FORMAT_CODECS["audio"]["mp3"]
+        codec = _choice_option(
+            options.get("audio_codec"),
+            {"libmp3lame", "aac", "libopus", "pcm_s16le", "flac"},
+            str(format_config["codec"]),
+        )
+        cmd += ["-vn", "-acodec", codec]
+        bitrate = options.get("audio_bitrate") or (format_config.get("bitrate") or {}).get(quality)
+        if bitrate:
+            cmd += ["-b:a", str(bitrate)]
+        sample_rate = _int_option(options.get("sample_rate"), minimum=8000, maximum=192000)
+        if sample_rate:
+            cmd += ["-ar", str(sample_rate)]
+        channels = _int_option(options.get("audio_channels"), minimum=1, maximum=8)
+        if channels:
+            cmd += ["-ac", str(channels)]
+    elif family == "video":
+        format_config = FORMAT_CODECS["video"].get(output_format) or FORMAT_CODECS["video"]["mp4"]
+        settings = VIDEO_QUALITY[quality]
+        video_codec = _choice_option(
+            options.get("video_codec"),
+            {"libx264", "libx265", "libvpx-vp9"},
+            str(format_config["video_codec"]),
+        )
+        audio_codec = _choice_option(
+            options.get("audio_codec"),
+            {"aac", "libopus", "libmp3lame"},
+            str(format_config["audio_codec"]),
+        )
+        crf = _int_option(options.get("crf"), settings["crf"], minimum=0, maximum=51)
+        cmd += [
+            "-c:v",
+            video_codec,
+            "-c:a",
+            audio_codec,
+            "-crf",
+            str(crf),
+        ]
+        if output_format == "webm":
+            cmd += ["-b:v", "0"]
+        else:
+            cmd += ["-preset", "medium"]
+            if output_format == "mp4":
+                cmd += ["-movflags", "+faststart"]
+        filters = []
+        max_width = _int_option(options.get("max_width"), settings.get("max_width"), minimum=16, maximum=7680)
+        max_height = _int_option(options.get("max_height"), None, minimum=16, maximum=4320)
+        max_fps = _int_option(options.get("max_fps"), settings.get("max_fps"), minimum=1, maximum=240)
+        if max_width:
+            target_height = max_height or -2
+            filters.append(f"scale=w='min({int(max_width)},iw)':h={target_height}:force_original_aspect_ratio=decrease")
+        if max_fps:
+            filters.append(f"fps={int(max_fps)}")
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+    elif family == "image":
+        settings = IMAGE_QUALITY[quality]
+        cmd += ["-frames:v", "1"]
+        max_width = _int_option(options.get("max_width"), settings.get("max_width"), minimum=16, maximum=20000)
+        max_height = _int_option(options.get("max_height"), max_width, minimum=16, maximum=20000) if max_width else None
+        if max_width and max_height:
+            cmd += [
+                "-vf",
+                f"scale=w='min({int(max_width)},iw)':h='min({int(max_height)},ih)':force_original_aspect_ratio=decrease",
+            ]
+        else:
+            cmd += _image_filter(quality)
+        image_quality = _int_option(options.get("image_quality"), settings["quality"], minimum=1, maximum=100)
+        if output_format == "webp":
+            cmd += ["-quality", str(image_quality)]
+        elif output_format == "jpg":
+            jpeg_q = max(2, min(31, round((100 - image_quality) / 3.3) + 2))
+            cmd += ["-q:v", str(jpeg_q)]
+        elif output_format == "png":
+            cmd += ["-compression_level", str(settings["png_level"])]
+    else:
+        cmd += ["-c", "copy"]
+
+    if strip_metadata:
+        cmd += ["-map_metadata", "-1"]
+
+    cmd.append(output_path)
+    return cmd
+
+
 def _build_convert_command(input_path: str, output_path: str, family: str | None, profile: dict):
     strip_metadata = bool(profile.get("strip_metadata", True))
     cmd = ["ffmpeg", "-y", "-i", input_path]
@@ -162,7 +343,7 @@ except Exception:
 
 @celery_app.task(bind=True, name="worker.process_download_and_convert")
 def process_download_and_convert(self, job_id: int):
-    """Download with yt-dlp and convert audio to mp3 using ffmpeg.
+    """Download with yt-dlp and convert to the requested media output.
     Updates job status in the SQLite DB and writes logs to /data/logs/job-{id}.log.
     """
     engine = _get_engine()
@@ -195,9 +376,18 @@ def process_download_and_convert(self, job_id: int):
             os.makedirs(outdir, exist_ok=True)
 
             _log(job_id, f"Starting download: {input_url}")
+            input_obj = job.input or {}
             preset_name = (job.input or {}).get('preset') if job.input else None
             preset = _PRESETS.get(preset_name) if preset_name else _PRESETS.get('default', {})
-            fmt = preset.get('format', 'bestaudio/best')
+            output_kind = _clean_choice(input_obj.get("output_kind"), {"audio", "video"}, "audio")
+            output_format = _clean_choice(
+                input_obj.get("output_format"),
+                set(FORMAT_CODECS[output_kind].keys()),
+                DEFAULT_FORMATS[output_kind],
+            )
+            quality = _quality_preset(input_obj)
+            strip_metadata = bool(input_obj.get("strip_metadata", True))
+            fmt = _download_format_selector(output_kind, input_obj.get("download_quality"))
             download_timeout = preset.get('download_timeout', 300)
             retries = int(preset.get('retries', 3))
             backoff = float(preset.get('backoff', 2))
@@ -243,33 +433,19 @@ def process_download_and_convert(self, job_id: int):
             session.add(job)
             session.commit()
 
-            # convert to mp3 using ffmpeg subprocess for simplicity
-            outpath = os.path.join(outdir, f"job-{job_id}.mp3")
-            _log(job_id, f"Converting to mp3: {outpath}")
+            outpath = os.path.join(outdir, f"job-{job_id}.{output_format}")
+            _log(job_id, f"Converting to {output_format}: {outpath}")
             try:
-                # allow preset to override ffmpeg options
-                ff = preset.get('ffmpeg', {}) if preset else {}
-                q = ff.get('quality', '2')
-                codec = ff.get('codec', 'libmp3lame')
-                # determine compression family/profile based on downloaded file or job input
-                try:
-                    family = resolve_compression_family(mime_type=None, file_name_or_ext=filename)
-                    profile_name = (job.input or {}).get('compression_profile', 'balanced')
-                    profile = get_compression_profile(family, profile_name)
-                    _log(job_id, f"Compression decision: family={family} profile={profile_name} options={profile}")
-                except Exception as _e:
-                    family = None
-                    profile = {}
-
-                # build ffmpeg command using profile if audio
-                if family == 'audio':
-                    codec = profile.get('codec', codec)
-                    if 'bitrate' in profile:
-                        cmd = ['ffmpeg', '-y', '-i', filename, '-vn', '-acodec', codec, '-b:a', profile['bitrate'], outpath]
-                    else:
-                        cmd = ['ffmpeg', '-y', '-i', filename, '-vn', '-acodec', codec, '-q:a', str(profile.get('quality', q)), outpath]
-                else:
-                    cmd = ['ffmpeg', '-y', '-i', filename, '-vn', '-acodec', codec, '-q:a', str(q), outpath]
+                _log(job_id, f"Output decision: kind={output_kind} format={output_format} quality={quality}")
+                cmd = _build_media_command(
+                    filename,
+                    outpath,
+                    output_kind,
+                    output_format,
+                    quality,
+                    strip_metadata,
+                    input_obj,
+                )
                 subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as e:
                 _log(job_id, f"Conversion failed: {e}")
@@ -354,29 +530,43 @@ def process_convert(self, job_id: int):
             os.makedirs(outdir, exist_ok=True)
 
             original_name = input_obj.get("original_filename") or input_path
-            profile_name = input_obj.get("compression_profile", "balanced")
+            quality = _quality_preset(input_obj)
             try:
-                family = resolve_compression_family(
+                source_family = resolve_compression_family(
                     mime_type=input_obj.get("mime_type"),
                     file_name_or_ext=original_name,
                 )
-                profile = get_compression_profile(family, profile_name)
             except Exception as e:
-                _log(job_id, f"Compression profile resolution failed: {e}")
+                _log(job_id, f"Media family resolution failed: {e}")
                 job.status = "failed"
                 job.error_message = str(e)
                 job.finished_at = datetime.datetime.utcnow()
                 session.add(job)
                 session.commit()
                 return
+            if source_family == "video":
+                allowed_output_families = {"video", "audio"}
+            elif source_family == "audio":
+                allowed_output_families = {"audio"}
+            elif source_family == "image":
+                allowed_output_families = {"image"}
+            else:
+                allowed_output_families = {source_family}
+            requested_family = str(input_obj.get("compression_family") or input_obj.get("output_family") or source_family).lower()
+            family = requested_family if requested_family in allowed_output_families else source_family
+            output_format = _clean_choice(
+                input_obj.get("output_format"),
+                set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else {"webp", "jpg", "png"},
+                DEFAULT_FORMATS.get(family, "mp3"),
+            )
+            strip_metadata = bool(input_obj.get("strip_metadata", True))
 
             stem = _safe_stem(original_name, f"job-{job_id}")
-            ext = _profile_output_ext(family, profile)
-            outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{ext}")
-            cmd = _build_convert_command(input_path, outpath, family, profile)
+            outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{output_format}")
+            cmd = _build_media_command(input_path, outpath, family, output_format, quality, strip_metadata, input_obj)
 
             _log(job_id, f"Starting local conversion: {input_path}")
-            _log(job_id, f"Compression decision: family={family} profile={profile_name} options={profile}")
+            _log(job_id, f"Output decision: source_family={source_family} family={family} format={output_format} quality={quality}")
             job.progress = 35
             job.current_step = "Konvertierung läuft"
             session.add(job)

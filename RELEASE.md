@@ -38,15 +38,13 @@ Set these in `.env` or your deployment secret store:
 ```text
 API_PORT
 TZ
-ADMIN_USER
-ADMIN_PASSWORD
 WORKER_CONCURRENCY
 DATABASE_URL
 REDIS_URL
 DATA_LOG_DIR
+DATA_UPLOAD_DIR
+MAX_UPLOAD_BYTES
 ```
-
-Change `ADMIN_PASSWORD` before exposing the app.
 
 ## 4. Data And Backups
 

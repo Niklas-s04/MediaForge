@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import ProfileSelector from './ProfileSelector'
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Modal from './Modal'
 
 type Job = {
@@ -12,8 +11,91 @@ type Job = {
 }
 
 type ActiveTab = 'download' | 'convert'
+type MediaFamily = 'video' | 'audio' | 'image'
+type QualityPreset = 'high' | 'balanced' | 'small'
+
+type FormatDef = {
+  value: string
+  label: string
+  family: MediaFamily
+  text: string
+}
+
+type InspectInfo = {
+  title?: string | null
+  uploader?: string | null
+  duration?: number | null
+  thumbnail?: string | null
+  formats?: { height?: number | null; ext?: string | null; fps?: number | null }[]
+}
+
+type AdvancedValues = {
+  video_codec: string
+  audio_codec: string
+  audio_bitrate: string
+  sample_rate: string
+  audio_channels: string
+  crf: string
+  max_width: string
+  max_height: string
+  max_fps: string
+  image_quality: string
+}
 
 const terminalStatuses = ['success', 'failed', 'cancelled', 'notfound']
+
+const formatCatalog: Record<MediaFamily, FormatDef[]> = {
+  video: [
+    { family: 'video', value: 'mp4', label: 'MP4', text: 'Universell, Web, TV und mobile Geräte' },
+    { family: 'video', value: 'webm', label: 'WebM', text: 'Modern, klein und browserfreundlich' },
+    { family: 'video', value: 'mkv', label: 'MKV', text: 'Flexible Datei für Archiv und NAS' },
+  ],
+  audio: [
+    { family: 'audio', value: 'mp3', label: 'MP3', text: 'Maximale Kompatibilität' },
+    { family: 'audio', value: 'm4a', label: 'M4A', text: 'Gute Qualität bei kleiner Datei' },
+    { family: 'audio', value: 'opus', label: 'Opus', text: 'Sehr effizient für Sprache und Musik' },
+    { family: 'audio', value: 'wav', label: 'WAV', text: 'Unkomprimiert für Schnittprogramme' },
+    { family: 'audio', value: 'flac', label: 'FLAC', text: 'Verlustfrei komprimiert' },
+  ],
+  image: [
+    { family: 'image', value: 'webp', label: 'WebP', text: 'Klein, modern und webfreundlich' },
+    { family: 'image', value: 'jpg', label: 'JPG', text: 'Fotos und breite Kompatibilität' },
+    { family: 'image', value: 'png', label: 'PNG', text: 'Grafiken und Transparenz' },
+  ],
+}
+
+const familyLabels: Record<MediaFamily, string> = {
+  video: 'Video',
+  audio: 'Audio',
+  image: 'Bild',
+}
+
+const qualityOptions: { value: QualityPreset; label: string; text: string }[] = [
+  { value: 'high', label: 'Originalnah', text: 'Mehr Qualität, größere Datei' },
+  { value: 'balanced', label: 'Ausgewogen', text: 'Guter Standard für Alltag und NAS' },
+  { value: 'small', label: 'Kleine Datei', text: 'Stark komprimiert für Speicherplatz' },
+]
+
+const downloadQualities = [
+  { value: 'best', label: 'Beste verfügbare' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p', label: '720p' },
+  { value: '480p', label: '480p' },
+  { value: '360p', label: '360p' },
+]
+
+const defaultAdvanced: AdvancedValues = {
+  video_codec: '',
+  audio_codec: '',
+  audio_bitrate: '',
+  sample_rate: '',
+  audio_channels: '',
+  crf: '',
+  max_width: '',
+  max_height: '',
+  max_fps: '',
+  image_quality: '',
+}
 
 function getStatusTone(status?: string) {
   const normalized = (status || '').toLowerCase()
@@ -50,14 +132,344 @@ function filenameFromDisposition(header: string | null) {
   return plainMatch ? plainMatch[1] : null
 }
 
+function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / 1024 / 1024).toFixed(bytes > 100 * 1024 * 1024 ? 0 : 1)} MB`
+}
+
+function formatDuration(seconds?: number | null) {
+  if (!seconds) return null
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.round(seconds % 60)
+  return `${mins}:${String(secs).padStart(2, '0')}`
+}
+
+function inferFamily(file: File | null): MediaFamily {
+  if (!file) return 'video'
+  if (file.type.startsWith('audio/')) return 'audio'
+  if (file.type.startsWith('image/')) return 'image'
+  if (file.type.startsWith('video/')) return 'video'
+  const ext = file.name.split('.').pop()?.toLowerCase()
+  if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'].includes(ext)) return 'audio'
+  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff'].includes(ext)) return 'image'
+  return 'video'
+}
+
+function fileExt(name?: string | null) {
+  const ext = name?.split('.').pop()?.toUpperCase()
+  return ext && ext.length <= 6 ? ext : 'MEDIA'
+}
+
+function allowedConvertFamilies(sourceFamily: MediaFamily): MediaFamily[] {
+  if (sourceFamily === 'video') return ['video', 'audio']
+  if (sourceFamily === 'audio') return ['audio']
+  return ['image']
+}
+
+function findFormat(family: MediaFamily, value: string): FormatDef {
+  return formatCatalog[family].find((format) => format.value === value) || formatCatalog[family][0]
+}
+
+function FormatPicker({
+  families,
+  selectedFamily,
+  selectedFormat,
+  open,
+  onOpenChange,
+  onSelect,
+}: {
+  families: MediaFamily[]
+  selectedFamily: MediaFamily
+  selectedFormat: string
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSelect: (family: MediaFamily, format: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [activeFamily, setActiveFamily] = useState<MediaFamily>(selectedFamily)
+  const selected = findFormat(selectedFamily, selectedFormat)
+  const formats = formatCatalog[activeFamily].filter((format) => {
+    const haystack = `${format.label} ${format.text}`.toLowerCase()
+    return haystack.includes(query.toLowerCase())
+  })
+
+  useEffect(() => {
+    if (!families.includes(activeFamily)) setActiveFamily(families[0])
+  }, [families, activeFamily])
+
+  return (
+    <div className="format-picker">
+      <button className="format-button" type="button" onClick={() => onOpenChange(!open)}>
+        <span>{selected.label}</span>
+        <small>{familyLabels[selected.family]}</small>
+      </button>
+      {open ? (
+        <div className="format-menu">
+          <label className="format-search">
+            <span>Search Format</span>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="z. B. mp4, mp3, webp" />
+          </label>
+          <div className="format-menu-body">
+            <div className="format-categories">
+              {families.map((family) => (
+                <button
+                  key={family}
+                  className={activeFamily === family ? 'active' : ''}
+                  type="button"
+                  onClick={() => setActiveFamily(family)}
+                >
+                  {familyLabels[family]}
+                </button>
+              ))}
+            </div>
+            <div className="format-results">
+              {formats.map((format) => (
+                <button
+                  key={`${format.family}-${format.value}`}
+                  className={format.value === selectedFormat && format.family === selectedFamily ? 'active' : ''}
+                  type="button"
+                  onClick={() => {
+                    onSelect(format.family, format.value)
+                    onOpenChange(false)
+                    setQuery('')
+                  }}
+                >
+                  <strong>{format.label}</strong>
+                  <span>{format.text}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function QualitySelector({
+  value,
+  onChange,
+}: {
+  value: QualityPreset
+  onChange: (value: QualityPreset) => void
+}) {
+  return (
+    <div className="quality-row">
+      {qualityOptions.map((option) => (
+        <button
+          key={option.value}
+          className={value === option.value ? 'active' : ''}
+          data-testid={`quality-${option.value}`}
+          type="button"
+          onClick={() => onChange(option.value)}
+        >
+          <strong>{option.label}</strong>
+          <span>{option.text}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function AdvancedOptions({
+  family,
+  values,
+  setValues,
+  stripMetadata,
+  setStripMetadata,
+  isDownload,
+  downloadQuality,
+  setDownloadQuality,
+}: {
+  family: MediaFamily
+  values: AdvancedValues
+  setValues: React.Dispatch<React.SetStateAction<AdvancedValues>>
+  stripMetadata: boolean
+  setStripMetadata: (value: boolean) => void
+  isDownload?: boolean
+  downloadQuality?: string
+  setDownloadQuality?: (value: string) => void
+}) {
+  const update = (key: keyof AdvancedValues, value: string) => {
+    setValues((current) => ({ ...current, [key]: value }))
+  }
+
+  return (
+    <div className="advanced-panel">
+      {isDownload && family === 'video' ? (
+        <label className="field">
+          <span>Download-Auflösung</span>
+          <select value={downloadQuality} onChange={(event) => setDownloadQuality?.(event.target.value)}>
+            {downloadQualities.map((quality) => (
+              <option key={quality.value} value={quality.value}>{quality.label}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {family === 'video' ? (
+        <>
+          <label className="field">
+            <span>Video-Codec</span>
+            <select value={values.video_codec} onChange={(event) => update('video_codec', event.target.value)}>
+              <option value="">Automatisch</option>
+              <option value="libx264">H.264</option>
+              <option value="libx265">H.265 / HEVC</option>
+              <option value="libvpx-vp9">VP9</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Audio-Codec</span>
+            <select value={values.audio_codec} onChange={(event) => update('audio_codec', event.target.value)}>
+              <option value="">Automatisch</option>
+              <option value="aac">AAC</option>
+              <option value="libopus">Opus</option>
+              <option value="libmp3lame">MP3</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>CRF</span>
+            <input value={values.crf} onChange={(event) => update('crf', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+          <label className="field">
+            <span>Max. Breite</span>
+            <input value={values.max_width} onChange={(event) => update('max_width', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+          <label className="field">
+            <span>Max. Höhe</span>
+            <input value={values.max_height} onChange={(event) => update('max_height', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+          <label className="field">
+            <span>Max. FPS</span>
+            <input value={values.max_fps} onChange={(event) => update('max_fps', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+        </>
+      ) : null}
+
+      {family === 'audio' ? (
+        <>
+          <label className="field">
+            <span>Audio-Codec</span>
+            <select value={values.audio_codec} onChange={(event) => update('audio_codec', event.target.value)}>
+              <option value="">Automatisch</option>
+              <option value="libmp3lame">MP3</option>
+              <option value="aac">AAC</option>
+              <option value="libopus">Opus</option>
+              <option value="flac">FLAC</option>
+              <option value="pcm_s16le">PCM WAV</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Bitrate</span>
+            <select value={values.audio_bitrate} onChange={(event) => update('audio_bitrate', event.target.value)}>
+              <option value="">Automatisch</option>
+              <option value="64k">64 kbit/s</option>
+              <option value="96k">96 kbit/s</option>
+              <option value="128k">128 kbit/s</option>
+              <option value="160k">160 kbit/s</option>
+              <option value="192k">192 kbit/s</option>
+              <option value="256k">256 kbit/s</option>
+              <option value="320k">320 kbit/s</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Sample-Rate</span>
+            <select value={values.sample_rate} onChange={(event) => update('sample_rate', event.target.value)}>
+              <option value="">Automatisch</option>
+              <option value="44100">44.1 kHz</option>
+              <option value="48000">48 kHz</option>
+              <option value="96000">96 kHz</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Kanäle</span>
+            <select value={values.audio_channels} onChange={(event) => update('audio_channels', event.target.value)}>
+              <option value="">Automatisch</option>
+              <option value="1">Mono</option>
+              <option value="2">Stereo</option>
+            </select>
+          </label>
+        </>
+      ) : null}
+
+      {family === 'image' ? (
+        <>
+          <label className="field">
+            <span>Bildqualität</span>
+            <input value={values.image_quality} onChange={(event) => update('image_quality', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+          <label className="field">
+            <span>Max. Breite</span>
+            <input value={values.max_width} onChange={(event) => update('max_width', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+          <label className="field">
+            <span>Max. Höhe</span>
+            <input value={values.max_height} onChange={(event) => update('max_height', event.target.value)} placeholder="Automatisch" inputMode="numeric" />
+          </label>
+        </>
+      ) : null}
+
+      <label className="toggle-row">
+        <input type="checkbox" checked={stripMetadata} onChange={(event) => setStripMetadata(event.target.checked)} />
+        <span>Metadaten entfernen</span>
+      </label>
+    </div>
+  )
+}
+
+function ConversionCard({
+  sourceTitle,
+  sourceMeta,
+  sourceFormat,
+  families,
+  selectedFamily,
+  selectedFormat,
+  pickerOpen,
+  onPickerOpen,
+  onSelect,
+}: {
+  sourceTitle: string
+  sourceMeta: string
+  sourceFormat: string
+  families: MediaFamily[]
+  selectedFamily: MediaFamily
+  selectedFormat: string
+  pickerOpen: boolean
+  onPickerOpen: (open: boolean) => void
+  onSelect: (family: MediaFamily, format: string) => void
+}) {
+  return (
+    <div className="convert-card">
+      <div className="source-file">
+        <span className="file-icon">{sourceFormat.slice(0, 3)}</span>
+        <div>
+          <strong>{sourceTitle}</strong>
+          <span>{sourceMeta}</span>
+        </div>
+      </div>
+      <div className="convert-chain">
+        <span>Convert</span>
+        <span className="format-chip">{sourceFormat}</span>
+        <span className="arrow">-&gt;</span>
+        <FormatPicker
+          families={families}
+          selectedFamily={selectedFamily}
+          selectedFormat={selectedFormat}
+          open={pickerOpen}
+          onOpenChange={onPickerOpen}
+          onSelect={onSelect}
+        />
+      </div>
+    </div>
+  )
+}
+
 function JobDetail({
   job,
-  auth,
   onDownload,
   onTerminal,
 }: {
   job: Job | null
-  auth: string | null
   onDownload: (job: Job) => void
   onTerminal: () => void
 }) {
@@ -79,7 +491,7 @@ function JobDetail({
 
     const connect = async () => {
       controller = new AbortController()
-      const hdrs: Record<string, string> = auth ? { Authorization: `Basic ${auth}` } : {}
+      const hdrs: Record<string, string> = {}
       if (lastEventId) hdrs['Last-Event-ID'] = String(lastEventId)
       try {
         const res = await fetch(`/api/jobs/${job.id}/events`, { headers: hdrs, signal: controller.signal })
@@ -144,7 +556,7 @@ function JobDetail({
       controller?.abort()
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
     }
-  }, [job?.id, auth])
+  }, [job?.id, onTerminal])
 
   if (!job) {
     return <EmptyState title="Kein Auftrag ausgewählt" text="Wähle einen Auftrag aus, um Details und Logs zu sehen." />
@@ -160,7 +572,9 @@ function JobDetail({
         <div className="detail-actions">
           <StatusBadge status={status || job.status} />
           {job.status === 'success' && job.output_path ? (
-            <button className="button primary" onClick={() => onDownload(job)}>Herunterladen</button>
+            <button className="button primary" type="button" onClick={() => onDownload(job)}>
+              Herunterladen
+            </button>
           ) : null}
         </div>
       </div>
@@ -175,42 +589,45 @@ function JobDetail({
 
 function App() {
   const [jobs, setJobs] = useState<Job[]>([])
-  const [presets, setPresets] = useState<Record<string, unknown>>({})
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<ActiveTab>('download')
   const [url, setUrl] = useState('')
-  const [presetSel, setPresetSel] = useState('default')
-  const [user, setUser] = useState('')
-  const [pass, setPass] = useState('')
-  const [auth, setAuth] = useState<string | null>(null)
-  const [compressionFamily, setCompressionFamily] = useState('audio')
-  const [compressionProfile, setCompressionProfile] = useState('balanced')
-  const [compressionLang, setCompressionLang] = useState<'de' | 'en'>('de')
+  const [downloadFamily, setDownloadFamily] = useState<MediaFamily>('video')
+  const [downloadFormat, setDownloadFormat] = useState('mp4')
+  const [downloadQuality, setDownloadQuality] = useState('best')
+  const [downloadQualityPreset, setDownloadQualityPreset] = useState<QualityPreset>('balanced')
+  const [downloadAdvanced, setDownloadAdvanced] = useState<AdvancedValues>(defaultAdvanced)
+  const [downloadInfo, setDownloadInfo] = useState<InspectInfo | null>(null)
+  const [isInspecting, setIsInspecting] = useState(false)
+  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [message, setMessage] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [sourceFamily, setSourceFamily] = useState<MediaFamily>('video')
+  const [convertFamily, setConvertFamily] = useState<MediaFamily>('video')
+  const [convertFormat, setConvertFormat] = useState('mp4')
+  const [convertQualityPreset, setConvertQualityPreset] = useState<QualityPreset>('balanced')
+  const [convertAdvanced, setConvertAdvanced] = useState<AdvancedValues>(defaultAdvanced)
+  const [stripMetadata, setStripMetadata] = useState(true)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState<ActiveTab | null>(null)
   const [compressionWarning, setCompressionWarning] = useState<string | null>(null)
   const [pendingWarning, setPendingWarning] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
-  const [message, setMessage] = useState<string | null>(null)
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  const presetNames = useMemo(() => Object.keys(presets || {}), [presets])
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) || null, [jobs, selectedId])
-  const finishedJobs = useMemo(
-    () => jobs.filter((job) => job.status === 'success' && job.output_path),
-    [jobs],
-  )
+  const finishedJobs = useMemo(() => jobs.filter((job) => job.status === 'success' && job.output_path), [jobs])
   const activeJobs = useMemo(
     () => jobs.filter((job) => ['queued', 'running'].includes((job.status || '').toLowerCase())).length,
     [jobs],
   )
+  const convertFamilies = allowedConvertFamilies(sourceFamily)
+  const activeQuality = activeTab === 'download' ? downloadQualityPreset : convertQualityPreset
+  const activeWarningFamily = activeTab === 'download' ? downloadFamily : convertFamily
 
   const loadJobs = async () => {
-    if (!auth) {
-      setJobs([])
-      return
-    }
     try {
-      const r = await fetch('/api/jobs', { headers: { Authorization: `Basic ${auth}` } })
+      const r = await fetch('/api/jobs')
       if (!r.ok) {
         setJobs([])
         return
@@ -223,69 +640,124 @@ function App() {
   }
 
   useEffect(() => {
-    fetch('/api/presets')
-      .then((r) => r.json())
-      .then((d) => setPresets(d))
-      .catch(() => setPresets({}))
+    loadJobs()
   }, [])
 
   useEffect(() => {
-    if (presetNames.length > 0 && !presetNames.includes(presetSel)) {
-      setPresetSel(presetNames[0])
-    }
-  }, [presetNames, presetSel])
-
-  useEffect(() => {
-    loadJobs()
-  }, [auth])
-
-  useEffect(() => {
-    if (!auth) return
     const interval = window.setInterval(loadJobs, 5000)
     return () => window.clearInterval(interval)
-  }, [auth])
+  }, [])
 
-  const login = () => {
-    setAuth(btoa(`${user}:${pass}`))
-    setMessage(null)
-  }
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
 
-  const handleAuthRequired = () => {
-    setMessage('Bitte zuerst anmelden.')
-  }
+  useEffect(() => {
+    const allowed = formatCatalog[downloadFamily].map((format) => format.value)
+    if (!allowed.includes(downloadFormat)) {
+      setDownloadFormat(formatCatalog[downloadFamily][0].value)
+    }
+  }, [downloadFamily, downloadFormat])
 
-  const createDownloadJob = async (force = false) => {
-    if (!auth) {
-      handleAuthRequired()
+  useEffect(() => {
+    const nextSource = inferFamily(selectedFile)
+    setSourceFamily(nextSource)
+    const allowed = allowedConvertFamilies(nextSource)
+    const nextFamily = allowed.includes(convertFamily) ? convertFamily : allowed[0]
+    setConvertFamily(nextFamily)
+    if (!formatCatalog[nextFamily].some((format) => format.value === convertFormat)) {
+      setConvertFormat(formatCatalog[nextFamily][0].value)
+    }
+  }, [selectedFile])
+
+  useEffect(() => {
+    if (!convertFamilies.includes(convertFamily)) {
+      setConvertFamily(convertFamilies[0])
+      setConvertFormat(formatCatalog[convertFamilies[0]][0].value)
       return
     }
+    if (!formatCatalog[convertFamily].some((format) => format.value === convertFormat)) {
+      setConvertFormat(formatCatalog[convertFamily][0].value)
+    }
+  }, [convertFamily, convertFormat, convertFamilies])
+
+  useEffect(() => {
+    const warningProfile = activeQuality === 'small' ? 'small' : 'balanced'
+    fetch(
+      `/api/compression/profile?family=${encodeURIComponent(activeWarningFamily)}&profile=${encodeURIComponent(warningProfile)}&lang=de`,
+    )
+      .then((r) => r.json())
+      .then((data) => setCompressionWarning(data.warning || null))
+      .catch(() => setCompressionWarning(null))
+  }, [activeWarningFamily, activeQuality])
+
+  const appendAdvanced = (target: FormData | Record<string, unknown>, values: AdvancedValues) => {
+    Object.entries(values).forEach(([key, value]) => {
+      if (!value) return
+      if (target instanceof FormData) target.set(key, value)
+      else target[key] = value
+    })
+  }
+
+  const analyzeDownload = async () => {
     if (!url.trim()) {
       setMessage('Bitte eine Download-URL eintragen.')
       return
     }
-    const body = {
-      type: 'download',
-      input: {
-        url: url.trim(),
-        preset: presetSel,
-        compression_profile: compressionProfile,
-        lang: compressionLang,
-        mime_type: `${compressionFamily}/x-mediaforge`,
-      },
+    try {
+      setIsInspecting(true)
+      setMessage(null)
+      const r = await fetch('/api/download/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim() }),
+      })
+      if (!r.ok) {
+        setDownloadInfo(null)
+        setMessage('Analyse nicht möglich. Du kannst den Download trotzdem starten.')
+        return
+      }
+      setDownloadInfo(await r.json())
+    } catch (e) {
+      setDownloadInfo(null)
+      setMessage('Analyse nicht möglich. Du kannst den Download trotzdem starten.')
+    } finally {
+      setIsInspecting(false)
     }
+  }
+
+  const createDownloadJob = async (force = false) => {
+    if (!url.trim()) {
+      setMessage('Bitte eine Download-URL eintragen.')
+      return
+    }
+    const input: Record<string, unknown> = {
+      url: url.trim(),
+      preset: 'default',
+      output_kind: downloadFamily,
+      output_format: downloadFormat,
+      download_quality: downloadFamily === 'video' ? downloadQuality : 'best',
+      quality_preset: downloadQualityPreset,
+      compression_profile: downloadQualityPreset === 'small' ? 'small' : 'balanced',
+      lang: 'de',
+      strip_metadata: stripMetadata,
+    }
+    appendAdvanced(input, downloadAdvanced)
+    const body = { type: 'download', input }
 
     try {
       setMessage(null)
-      const params = new URLSearchParams({ lang: compressionLang })
+      const params = new URLSearchParams({ lang: 'de' })
       if (force) params.set('force', 'true')
       const r = await fetch(`/api/jobs?${params.toString()}`, {
         method: 'POST',
-        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
       if (r.ok) {
         const created = await r.json()
         setUrl('')
+        setDownloadInfo(null)
         setPendingWarning(null)
         setMessage(`Download gestartet: Auftrag #${created.id}`)
         setSelectedId(created.id)
@@ -293,7 +765,7 @@ function App() {
       } else if (r.status === 409) {
         const data = await r.json().catch(() => null)
         setPendingAction('download')
-        setPendingWarning(data?.detail?.warning || data?.warning || compressionWarning || 'Quality warning')
+      setPendingWarning(data?.detail?.warning || data?.warning || compressionWarning || 'Qualitätswarnung')
       } else {
         setMessage('Download konnte nicht gestartet werden.')
       }
@@ -303,10 +775,6 @@ function App() {
   }
 
   const createConvertJob = async (force = false) => {
-    if (!auth) {
-      handleAuthRequired()
-      return
-    }
     if (!selectedFile) {
       setMessage('Bitte eine Datei auswählen.')
       return
@@ -314,10 +782,14 @@ function App() {
 
     const data = new FormData()
     data.set('file', selectedFile)
-    data.set('preset', presetSel)
-    data.set('compression_family', compressionFamily)
-    data.set('compression_profile', compressionProfile)
-    data.set('lang', compressionLang)
+    data.set('preset', 'default')
+    data.set('compression_family', convertFamily)
+    data.set('compression_profile', convertQualityPreset === 'small' ? 'small' : 'balanced')
+    data.set('quality_preset', convertQualityPreset)
+    data.set('output_format', convertFormat)
+    data.set('strip_metadata', stripMetadata ? 'true' : 'false')
+    data.set('lang', 'de')
+    appendAdvanced(data, convertAdvanced)
 
     try {
       setMessage(null)
@@ -326,7 +798,6 @@ function App() {
       const suffix = params.toString() ? `?${params.toString()}` : ''
       const r = await fetch(`/api/jobs/convert-upload${suffix}`, {
         method: 'POST',
-        headers: { Authorization: `Basic ${auth}` },
         body: data,
       })
       if (r.ok) {
@@ -340,7 +811,9 @@ function App() {
       } else if (r.status === 409) {
         const warning = await r.json().catch(() => null)
         setPendingAction('convert')
-        setPendingWarning(warning?.detail?.warning || warning?.warning || compressionWarning || 'Quality warning')
+        setPendingWarning(warning?.detail?.warning || warning?.warning || compressionWarning || 'Qualitätswarnung')
+      } else if (r.status === 413) {
+        setMessage('Die Datei ist größer als das erlaubte Upload-Limit.')
       } else {
         setMessage('Konvertierung konnte nicht gestartet werden.')
       }
@@ -350,14 +823,8 @@ function App() {
   }
 
   const downloadJob = async (job: Job) => {
-    if (!auth) {
-      handleAuthRequired()
-      return
-    }
     try {
-      const r = await fetch(`/api/jobs/${job.id}/download`, {
-        headers: { Authorization: `Basic ${auth}` },
-      })
+      const r = await fetch(`/api/jobs/${job.id}/download`)
       if (!r.ok) {
         setMessage('Datei ist noch nicht herunterladbar.')
         return
@@ -377,12 +844,19 @@ function App() {
   }
 
   const confirmPendingWarning = () => {
-    if (pendingAction === 'download') {
-      createDownloadJob(true)
-    } else {
-      createConvertJob(true)
-    }
+    if (pendingAction === 'download') createDownloadJob(true)
+    else createConvertJob(true)
   }
+
+  const onDropFile = (event: React.DragEvent<HTMLLabelElement>) => {
+    event.preventDefault()
+    const file = event.dataTransfer.files?.[0]
+    if (file) setSelectedFile(file)
+  }
+
+  const availableHeights = (downloadInfo?.formats || [])
+    .map((format) => format.height)
+    .filter((height): height is number => Boolean(height))
 
   return (
     <main className="app-shell">
@@ -391,41 +865,25 @@ function App() {
           <span className="brand-mark">MF</span>
           <div>
             <h1>MediaForge</h1>
-            <p>Medien herunterladen, konvertieren und fertige Dateien sichern.</p>
+            <p>Downloads und Konvertierungen mit passenden Formaten und Feineinstellungen.</p>
           </div>
         </div>
-        <div className="auth-box">
-          <input aria-label="Benutzer" placeholder="user" value={user} onChange={(e) => setUser(e.target.value)} />
-          <input
-            aria-label="Passwort"
-            placeholder="password"
-            type="password"
-            value={pass}
-            onChange={(e) => setPass(e.target.value)}
-          />
-          <button className="button secondary" onClick={login}>{auth ? 'Aktualisieren' : 'Login'}</button>
-        </div>
+        <button
+          className="theme-toggle"
+          type="button"
+          aria-pressed={theme === 'dark'}
+          onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+        >
+          <span>{theme === 'dark' ? 'Dunkel' : 'Hell'}</span>
+          <i aria-hidden="true" />
+        </button>
       </header>
 
       <section className="main-layout">
         <div className="work-column">
           <div className="tab-bar" role="tablist" aria-label="Auftragstyp">
-            <button
-              className={`tab-button ${activeTab === 'download' ? 'active' : ''}`}
-              role="tab"
-              aria-selected={activeTab === 'download'}
-              onClick={() => setActiveTab('download')}
-            >
-              Download
-            </button>
-            <button
-              className={`tab-button ${activeTab === 'convert' ? 'active' : ''}`}
-              role="tab"
-              aria-selected={activeTab === 'convert'}
-              onClick={() => setActiveTab('convert')}
-            >
-              Konvertieren
-            </button>
+            <button className={`tab-button ${activeTab === 'download' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'download'} type="button" onClick={() => setActiveTab('download')}>Download</button>
+            <button className={`tab-button ${activeTab === 'convert' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'convert'} type="button" onClick={() => setActiveTab('convert')}>Konvertieren</button>
           </div>
 
           <section className="panel work-panel">
@@ -434,41 +892,60 @@ function App() {
                 <div className="panel-header">
                   <div>
                     <p className="eyebrow">Online-Quelle</p>
-                    <h2>Download starten</h2>
+                    <h2>Medium herunterladen</h2>
                   </div>
                 </div>
-                <div className="form-grid download-form">
-                  <label className="field wide">
-                    <span>URL</span>
-                    <input
-                      placeholder="https://..."
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                    />
-                  </label>
+                <div className="url-row">
                   <label className="field">
-                    <span>Preset</span>
-                    <select value={presetSel} onChange={(e) => setPresetSel(e.target.value)}>
-                      {(presetNames.length ? presetNames : ['default']).map((name) => (
-                        <option key={name} value={name}>{name}</option>
-                      ))}
-                    </select>
+                    <span>URL</span>
+                    <input placeholder="https://..." value={url} onChange={(e) => { setUrl(e.target.value); setDownloadInfo(null) }} />
                   </label>
+                  <button className="button secondary" type="button" onClick={analyzeDownload}>{isInspecting ? 'Analysiere...' : 'Analysieren'}</button>
                 </div>
-                <ProfileSelector
-                  family={compressionFamily}
-                  profile={compressionProfile}
-                  lang={compressionLang}
-                  warning={compressionWarning}
-                  onFamilyChange={setCompressionFamily}
-                  onProfileChange={setCompressionProfile}
-                  onLangChange={setCompressionLang}
-                  onWarningChange={setCompressionWarning}
+                {downloadInfo ? (
+                  <div className="inspect-result">
+                    {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" /> : <span className="media-thumb">MF</span>}
+                    <div>
+                      <strong>{downloadInfo.title || 'Medium erkannt'}</strong>
+                      <span>{[downloadInfo.uploader, formatDuration(downloadInfo.duration)].filter(Boolean).join(' - ') || 'Bereit für den Download'}</span>
+                      {availableHeights.length ? <small>Videoqualitäten bis {Math.max(...availableHeights)}p erkannt</small> : null}
+                    </div>
+                  </div>
+                ) : null}
+                <ConversionCard
+                  sourceTitle={downloadInfo?.title || 'Online-Medium'}
+                  sourceMeta={url || 'URL einfügen und optional analysieren'}
+                  sourceFormat="WEB"
+                  families={['video', 'audio']}
+                  selectedFamily={downloadFamily}
+                  selectedFormat={downloadFormat}
+                  pickerOpen={pickerOpen === 'download'}
+                  onPickerOpen={(open) => setPickerOpen(open ? 'download' : null)}
+                  onSelect={(family, format) => {
+                    setDownloadFamily(family)
+                    setDownloadFormat(format)
+                  }}
                 />
-                <div className="panel-footer">
-                  <button className="button primary" data-testid="create-job" onClick={() => createDownloadJob()}>
-                    Download starten
-                  </button>
+                <div className="options-block">
+                  <div className="options-title">
+                    <span>Qualität</span>
+                    <button className="link-button" type="button" onClick={() => setAdvancedOpen((open) => !open)}>
+                      {advancedOpen ? 'Optionen ausblenden' : 'Detaillierte Optionen'}
+                    </button>
+                  </div>
+                  <QualitySelector value={downloadQualityPreset} onChange={setDownloadQualityPreset} />
+                  {advancedOpen ? (
+                    <AdvancedOptions
+                      family={downloadFamily}
+                      values={downloadAdvanced}
+                      setValues={setDownloadAdvanced}
+                      stripMetadata={stripMetadata}
+                      setStripMetadata={setStripMetadata}
+                      isDownload
+                      downloadQuality={downloadQuality}
+                      setDownloadQuality={setDownloadQuality}
+                    />
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -480,52 +957,58 @@ function App() {
                   </div>
                 </div>
                 <div className="upload-area">
-                  <input
-                    id="file-upload"
-                    ref={fileInputRef}
-                    type="file"
-                    onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-                  />
-                  <label htmlFor="file-upload">
-                    <strong>{selectedFile ? selectedFile.name : 'Datei auswählen'}</strong>
-                    <span>
-                      {selectedFile
-                        ? `${Math.max(1, Math.round(selectedFile.size / 1024))} KB bereit zur Konvertierung`
-                        : 'Audio, Video oder Bild vom Computer hochladen'}
-                    </span>
+                  <input id="file-upload" ref={fileInputRef} type="file" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} />
+                  <label htmlFor="file-upload" onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
+                    <strong>{selectedFile ? selectedFile.name : 'Datei auswählen oder hier ablegen'}</strong>
+                    <span>{selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]} erkannt` : 'Audio, Video oder Bild vom Computer hochladen'}</span>
                   </label>
                 </div>
-                <div className="form-grid single-select">
-                  <label className="field">
-                    <span>Preset</span>
-                    <select value={presetSel} onChange={(e) => setPresetSel(e.target.value)}>
-                      {(presetNames.length ? presetNames : ['default']).map((name) => (
-                        <option key={name} value={name}>{name}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <ProfileSelector
-                  family={compressionFamily}
-                  profile={compressionProfile}
-                  lang={compressionLang}
-                  warning={compressionWarning}
-                  onFamilyChange={setCompressionFamily}
-                  onProfileChange={setCompressionProfile}
-                  onLangChange={setCompressionLang}
-                  onWarningChange={setCompressionWarning}
+                <ConversionCard
+                  sourceTitle={selectedFile?.name || 'Keine Datei ausgewählt'}
+                  sourceMeta={selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]}` : 'Datei hochladen, dann Ziel-Format wählen'}
+                  sourceFormat={selectedFile ? fileExt(selectedFile.name) : 'FILE'}
+                  families={convertFamilies}
+                  selectedFamily={convertFamily}
+                  selectedFormat={convertFormat}
+                  pickerOpen={pickerOpen === 'convert'}
+                  onPickerOpen={(open) => setPickerOpen(open ? 'convert' : null)}
+                  onSelect={(family, format) => {
+                    setConvertFamily(family)
+                    setConvertFormat(format)
+                  }}
                 />
-                <div className="panel-footer">
-                  <button className="button primary" onClick={() => createConvertJob()}>
-                    Konvertierung starten
-                  </button>
+                <div className="options-block">
+                  <div className="options-title">
+                    <span>Qualität</span>
+                    <button className="link-button" type="button" onClick={() => setAdvancedOpen((open) => !open)}>
+                      {advancedOpen ? 'Optionen ausblenden' : 'Detaillierte Optionen'}
+                    </button>
+                  </div>
+                  <QualitySelector value={convertQualityPreset} onChange={setConvertQualityPreset} />
+                  {advancedOpen ? (
+                    <AdvancedOptions
+                      family={convertFamily}
+                      values={convertAdvanced}
+                      setValues={setConvertAdvanced}
+                      stripMetadata={stripMetadata}
+                      setStripMetadata={setStripMetadata}
+                    />
+                  ) : null}
                 </div>
               </>
             )}
+
+            {compressionWarning ? <div className="warning-inline"><strong>Hinweis:</strong> {compressionWarning}</div> : null}
+
+            <div className="panel-footer">
+              <button className="button primary" data-testid="create-job" type="button" onClick={() => (activeTab === 'download' ? createDownloadJob() : createConvertJob())}>
+                {activeTab === 'download' ? 'Download starten' : 'Konvertierung starten'}
+              </button>
+            </div>
             {message ? <div className="message">{message}</div> : null}
           </section>
 
-          <JobDetail job={selectedJob} auth={auth} onDownload={downloadJob} onTerminal={loadJobs} />
+          <JobDetail job={selectedJob} onDownload={downloadJob} onTerminal={loadJobs} />
         </div>
 
         <aside className="side-column">
@@ -535,20 +1018,14 @@ function App() {
                 <p className="eyebrow">Aufträge</p>
                 <h2>{jobs.length} insgesamt</h2>
               </div>
-              <button className="button ghost" onClick={loadJobs}>Aktualisieren</button>
+              <button className="button ghost" type="button" onClick={loadJobs}>Aktualisieren</button>
             </div>
-            {!auth ? (
-              <EmptyState title="Login erforderlich" text="Melde dich an, um Aufträge zu erstellen und Dateien herunterzuladen." />
-            ) : jobs.length === 0 ? (
+            {jobs.length === 0 ? (
               <EmptyState title="Noch keine Aufträge" text="Starte einen Download oder lade eine Datei zur Konvertierung hoch." />
             ) : (
               <div className="item-list">
                 {jobs.map((job) => (
-                  <button
-                    key={job.id}
-                    className={`list-item ${selectedId === job.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedId(job.id)}
-                  >
+                  <button key={job.id} className={`list-item ${selectedId === job.id ? 'selected' : ''}`} type="button" onClick={() => setSelectedId(job.id)}>
                     <span className="item-main">
                       <strong>#{job.id} {job.type === 'convert' ? 'Konvertierung' : 'Download'}</strong>
                       <small>{job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet')}</small>
@@ -564,7 +1041,7 @@ function App() {
             <div className="panel-header compact">
               <div>
                 <p className="eyebrow">Fertig</p>
-                <h2>Downloads</h2>
+                <h2>Dateien</h2>
               </div>
               <span className="count-label">{finishedJobs.length}</span>
             </div>
@@ -578,7 +1055,7 @@ function App() {
                       <strong>{fallbackDownloadName(job)}</strong>
                       <small>Auftrag #{job.id}</small>
                     </span>
-                    <button className="button secondary" onClick={() => downloadJob(job)}>Download</button>
+                    <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
                   </div>
                 ))}
               </div>
@@ -588,16 +1065,10 @@ function App() {
       </section>
 
       {pendingWarning ? (
-        <Modal
-          title={compressionLang === 'de' ? 'Qualitätswarnung' : 'Quality warning'}
-          onClose={() => setPendingWarning(null)}
-          onConfirm={confirmPendingWarning}
-          cancelLabel={compressionLang === 'de' ? 'Abbrechen' : 'Cancel'}
-          confirmLabel={compressionLang === 'de' ? 'Trotzdem starten' : 'Start anyway'}
-        >
-          <p>{compressionLang === 'de' ? 'Das gewählte Profil kann Qualitätsverluste verursachen:' : 'The selected profile may cause quality loss:'}</p>
+        <Modal title="Qualitätswarnung" onClose={() => setPendingWarning(null)} onConfirm={confirmPendingWarning} cancelLabel="Abbrechen" confirmLabel="Trotzdem starten">
+          <p>Das gewählte Qualitätsziel kann sichtbare oder hörbare Verluste verursachen:</p>
           <p><strong>{pendingWarning}</strong></p>
-          <p>{compressionLang === 'de' ? 'Möchtest du trotzdem fortfahren?' : 'Do you want to continue?'}</p>
+          <p>Möchtest du trotzdem fortfahren?</p>
         </Modal>
       ) : null}
     </main>
@@ -605,3 +1076,5 @@ function App() {
 }
 
 export default App
+
+

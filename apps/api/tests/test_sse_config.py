@@ -1,4 +1,4 @@
-from starlette.requests import Request
+﻿from starlette.requests import Request
 from sqlmodel import SQLModel, Session, create_engine
 
 from apps.api.app import main
@@ -82,7 +82,7 @@ def test_job_events_uses_data_log_dir_and_resume_offset(monkeypatch, tmp_path):
     (log_dir / f"job-{job_id}.log").write_text("hello resumed", encoding="utf-8")
     request = make_request([(b"last-event-id", b"6")])
 
-    response = main.job_events(job_id, request=request, username="tester")
+    response = main.job_events(job_id, request=request)
     text = asyncio.run(collect_stream_text(response))
 
     assert "id: 13" in text
@@ -109,7 +109,7 @@ def test_flow_events_uses_data_log_dir_and_resume_offset(monkeypatch, tmp_path):
     (log_dir / f"flow-{flow_id}.log").write_text("skip completed", encoding="utf-8")
     request = make_request([(b"last-event-id", b"5")])
 
-    response = main.flow_events(flow_id, request=request, username="tester")
+    response = main.flow_events(flow_id, request=request)
     text = asyncio.run(collect_stream_text(response))
 
     assert "id: 14" in text
@@ -141,9 +141,10 @@ def test_run_events_uses_data_log_dir_and_resume_offset(monkeypatch, tmp_path):
     (log_dir / f"flow-{flow_id}.log").write_text(f"skip\n(run {run_id}) resumed", encoding="utf-8")
     request = make_request([(b"last-event-id", b"5")])
 
-    response = main.run_events(run_id, request=request, username="tester")
+    response = main.run_events(run_id, request=request)
     text = asyncio.run(collect_stream_text(response))
 
     assert f"id: {len((log_dir / f'flow-{flow_id}.log').read_bytes())}" in text
     assert '"status": "completed"' in text
     assert f"(run {run_id}) resumed" in text
+

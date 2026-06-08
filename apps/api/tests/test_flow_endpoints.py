@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 from fastapi import HTTPException
 from sqlmodel import SQLModel, Session, create_engine
 
@@ -16,7 +16,8 @@ def test_run_missing_flow_returns_404():
 
     with Session(engine) as session:
         with pytest.raises(HTTPException) as exc:
-            run_flow_endpoint(999, username="tester", session=session)
+            run_flow_endpoint(999, session=session)
 
     assert exc.value.status_code == 404
     assert exc.value.detail == "Flow not found"
+

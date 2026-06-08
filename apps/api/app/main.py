@@ -1,15 +1,12 @@
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 from .db import create_db_and_tables, get_session
 from . import crud, models
 from .schemas import JobCreate, JobRead, FlowCreate, FlowRead, FlowRunRead
 from .celery_app import celery_app
 from sqlmodel import Session
-from passlib.context import CryptContext
-from passlib.hash import pbkdf2_sha256
-import secrets
 import os
 import time
 import json
@@ -28,6 +25,23 @@ from .audit import audit_override
 app = FastAPI(title="MediaForge API")
 logger = logging.getLogger(__name__)
 
+
+DOWNLOAD_FORMATS = {
+    "audio": {"mp3", "m4a", "opus", "wav", "flac"},
+    "video": {"mp4", "webm", "mkv"},
+}
+CONVERT_FORMATS = {
+    "audio": {"mp3", "m4a", "opus", "wav", "flac"},
+    "video": {"mp4", "webm", "mkv"},
+    "image": {"webp", "jpg", "png"},
+}
+QUALITY_PRESETS = {"high", "balanced", "small"}
+DOWNLOAD_QUALITIES = {"best", "1080p", "720p", "480p", "360p"}
+
+
+class DownloadInspectRequest(BaseModel):
+    url: str
+
 # Serve frontend static assets if mounted into the container at /app/static
 static_dir = "/app/static"
 
@@ -44,9 +58,6 @@ try:
     app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 except Exception:
     pass
-
-
-security = HTTPBasic()
 
 
 def get_log_dir() -> str:
@@ -82,29 +93,6 @@ def get_resume_offset(request: Request) -> int:
         return int(last_event_id) if last_event_id else 0
     except Exception:
         return 0
-
-
-# Helper wrappers using passlib's pbkdf2 implementation directly to avoid bcrypt/native-extension checks
-def hash_password(password: str) -> str:
-    return pbkdf2_sha256.hash(password)
-
-
-def verify_password(password: str, hashed: str) -> bool:
-    return pbkdf2_sha256.verify(password, hashed)
-
-
-def verify_credentials(
-    credentials: HTTPBasicCredentials = Depends(security),
-    session: Session = Depends(get_session),
-):
-    # Check users table for username and verify hashed password
-    user = crud.get_user_by_username(session, credentials.username)
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    verified = verify_password(credentials.password, user.hashed_password)
-    if not verified:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return user.username
 
 
 def safe_upload_filename(filename: str | None) -> str:
@@ -170,6 +158,138 @@ def infer_file_name_or_ext(input_obj: dict) -> str | None:
         return os.path.basename(file_path)
 
     return None
+
+
+def quality_to_warning_profile(quality_preset: str | None) -> str:
+    return "small" if quality_preset == "small" else "balanced"
+
+
+def infer_family_from_upload(file: UploadFile, fallback: str | None = None) -> str:
+    family = resolve_compression_family(
+        mime_type=file.content_type,
+        file_name_or_ext=file.filename,
+    )
+    if family in CONVERT_FORMATS:
+        return family
+    if fallback in CONVERT_FORMATS:
+        return fallback
+    raise HTTPException(status_code=400, detail="Unsupported media type")
+
+
+def normalize_download_input(input_obj: dict) -> dict:
+    normalized = dict(input_obj or {})
+    output_kind = normalized.get("output_kind") or normalized.get("media_mode") or "audio"
+    output_kind = str(output_kind).lower()
+    if output_kind not in DOWNLOAD_FORMATS:
+        raise HTTPException(status_code=400, detail=f"Unsupported download output kind '{output_kind}'")
+
+    default_format = "mp3" if output_kind == "audio" else "mp4"
+    output_format = str(normalized.get("output_format") or default_format).lower().lstrip(".")
+    if output_format not in DOWNLOAD_FORMATS[output_kind]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported {output_kind} download format '{output_format}'",
+        )
+
+    quality_preset = str(normalized.get("quality_preset") or "balanced").lower()
+    if quality_preset not in QUALITY_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Unsupported quality preset '{quality_preset}'")
+
+    download_quality = str(normalized.get("download_quality") or "best").lower()
+    if download_quality not in DOWNLOAD_QUALITIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported download quality '{download_quality}'")
+
+    normalized["output_kind"] = output_kind
+    normalized["output_format"] = output_format
+    normalized["quality_preset"] = quality_preset
+    normalized["download_quality"] = download_quality
+    normalized["strip_metadata"] = bool(normalized.get("strip_metadata", True))
+    normalized["compression_profile"] = quality_to_warning_profile(quality_preset)
+    normalized["lang"] = normalized.get("lang") or "de"
+    normalized["mime_type"] = f"{output_kind}/x-mediaforge"
+    return normalized
+
+
+def normalize_convert_options(
+    *,
+    file: UploadFile,
+    compression_family: str | None,
+    compression_profile: str | None,
+    output_format: str | None,
+    quality_preset: str | None,
+    strip_metadata: bool,
+) -> dict:
+    source_family = infer_family_from_upload(file, compression_family)
+    requested_family = compression_family if isinstance(compression_family, str) else None
+    output_family = str(requested_family or source_family).lower()
+    if source_family == "video":
+        allowed_families = {"video", "audio"}
+    elif source_family == "audio":
+        allowed_families = {"audio"}
+    elif source_family == "image":
+        allowed_families = {"image"}
+    else:
+        allowed_families = {source_family}
+    if output_family not in allowed_families:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot convert {source_family} to {output_family}",
+        )
+
+    requested_quality = quality_preset if isinstance(quality_preset, str) else None
+    requested_profile = compression_profile if isinstance(compression_profile, str) else None
+    requested_format = output_format if isinstance(output_format, str) else None
+    effective_strip_metadata = strip_metadata if isinstance(strip_metadata, bool) else True
+    effective_quality = str(requested_quality or requested_profile or "balanced").lower()
+    if effective_quality not in QUALITY_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Unsupported quality preset '{effective_quality}'")
+
+    default_format = {"audio": "mp3", "video": "mp4", "image": "webp"}[output_family]
+    effective_format = str(requested_format or default_format).lower().lstrip(".")
+    if effective_format not in CONVERT_FORMATS[output_family]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported {output_family} conversion format '{effective_format}'",
+        )
+
+    return {
+        "source_family": source_family,
+        "family": output_family,
+        "output_format": effective_format,
+        "quality_preset": effective_quality,
+        "compression_profile": quality_to_warning_profile(effective_quality),
+        "strip_metadata": effective_strip_metadata,
+    }
+
+
+def optional_form_text(value) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def summarize_download_info(info: dict) -> dict:
+    formats = []
+    seen_heights = set()
+    for item in info.get("formats") or []:
+        height = item.get("height")
+        if not height or height in seen_heights:
+            continue
+        seen_heights.add(height)
+        formats.append(
+            {
+                "height": height,
+                "ext": item.get("ext"),
+                "fps": item.get("fps"),
+            }
+        )
+    formats.sort(key=lambda value: value.get("height") or 0, reverse=True)
+    return {
+        "title": info.get("title"),
+        "uploader": info.get("uploader") or info.get("channel"),
+        "duration": info.get("duration"),
+        "thumbnail": info.get("thumbnail"),
+        "webpage_url": info.get("webpage_url") or info.get("original_url"),
+        "formats": formats[:8],
+    }
 
 
 def validate_compression_warning(
@@ -243,29 +363,6 @@ def dispatch_job(job: models.Job):
 def on_startup():
     create_db_and_tables()
 
-    # Ensure admin user exists
-    admin_user = os.environ.get("ADMIN_USER", "admin")
-    admin_pass = os.environ.get("ADMIN_PASSWORD", "admin")
-
-    # bcrypt has a 72-byte input limit; truncate long passwords to avoid ValueError
-    try:
-        b = admin_pass.encode("utf-8")
-        if len(b) > 72:
-            logging.warning("ADMIN_PASSWORD longer than 72 bytes; truncating before hashing")
-            admin_pass = b[:72].decode("utf-8", errors="ignore")
-    except Exception:
-        # be conservative: ensure admin_pass is a string
-        admin_pass = str(admin_pass)[:72]
-
-    from .db import engine
-    from sqlmodel import Session as SQLSession
-
-    with SQLSession(engine) as session:
-        existing = crud.get_user_by_username(session, admin_user)
-        if not existing:
-            hashed = hash_password(admin_pass)
-            crud.create_user(session, admin_user, hashed, is_admin=True)
-
 
 @app.get("/health")
 def health():
@@ -285,16 +382,20 @@ def create_job(
     req: JobCreate,
     force: bool = False,
     lang: str = "de",
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
+    if req.type != "download":
+        raise HTTPException(status_code=400, detail=f"Unsupported job type '{req.type}'")
+
+    input_obj = normalize_download_input(req.input or {})
+    payload = {"type": req.type, "input": input_obj}
+
     # Server-side validation: if a compression_profile is provided, evaluate warnings
     try:
-        input_obj = req.input or {}
         validate_compression_warning(
-            payload=req.dict(),
+            payload=payload,
             input_obj=input_obj,
-            username=username,
+            username="local",
             session=session,
             force=force,
             lang=lang,
@@ -306,10 +407,7 @@ def create_job(
         # non-fatal: continue to job creation if validation fails unexpectedly
         logger.exception("Unexpected compression validation error")
 
-    if req.type != "download":
-        raise HTTPException(status_code=400, detail=f"Unsupported job type '{req.type}'")
-
-    job = crud.create_job(session, req.type, req.input)
+    job = crud.create_job(session, req.type, input_obj)
 
     # Dispatch worker task to process this job
     try:
@@ -336,17 +434,52 @@ def create_convert_upload_job(
     preset: str = Form("default"),
     compression_family: str = Form("audio"),
     compression_profile: str = Form("balanced"),
+    output_format: str | None = Form(None),
+    quality_preset: str | None = Form(None),
+    strip_metadata: bool = Form(True),
+    video_codec: str | None = Form(None),
+    audio_codec: str | None = Form(None),
+    audio_bitrate: str | None = Form(None),
+    sample_rate: str | None = Form(None),
+    audio_channels: str | None = Form(None),
+    crf: str | None = Form(None),
+    max_width: str | None = Form(None),
+    max_height: str | None = Form(None),
+    max_fps: str | None = Form(None),
+    image_quality: str | None = Form(None),
     lang: str = Form("de"),
     force: bool = False,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
+    options = normalize_convert_options(
+        file=file,
+        compression_family=compression_family,
+        compression_profile=compression_profile,
+        output_format=output_format,
+        quality_preset=quality_preset,
+        strip_metadata=strip_metadata,
+    )
     input_obj = {
         "source": "upload",
         "preset": preset,
-        "compression_profile": compression_profile,
+        "source_family": options["source_family"],
+        "compression_family": options["family"],
+        "compression_profile": options["compression_profile"],
+        "quality_preset": options["quality_preset"],
+        "output_format": options["output_format"],
+        "strip_metadata": options["strip_metadata"],
+        "video_codec": optional_form_text(video_codec),
+        "audio_codec": optional_form_text(audio_codec),
+        "audio_bitrate": optional_form_text(audio_bitrate),
+        "sample_rate": optional_form_text(sample_rate),
+        "audio_channels": optional_form_text(audio_channels),
+        "crf": optional_form_text(crf),
+        "max_width": optional_form_text(max_width),
+        "max_height": optional_form_text(max_height),
+        "max_fps": optional_form_text(max_fps),
+        "image_quality": optional_form_text(image_quality),
         "lang": lang,
-        "mime_type": file.content_type or f"{compression_family}/x-mediaforge",
+        "mime_type": file.content_type or f"{options['family']}/x-mediaforge",
         "original_filename": file.filename,
     }
     payload = {"type": "convert", "input": input_obj}
@@ -355,7 +488,7 @@ def create_convert_upload_job(
         validate_compression_warning(
             payload=payload,
             input_obj=input_obj,
-            username=username,
+            username="local",
             session=session,
             force=force,
             lang=lang,
@@ -387,7 +520,6 @@ def create_convert_upload_job(
 @app.get("/api/jobs/{job_id}")
 def get_job(
     job_id: int,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     job = crud.get_job(session, job_id)
@@ -397,7 +529,7 @@ def get_job(
 
 
 @app.get("/api/jobs/{job_id}/logs")
-def get_job_logs(job_id: int, username: str = Depends(verify_credentials)):
+def get_job_logs(job_id: int):
     text = crud.read_job_log(job_id)
     return {"job_id": job_id, "log": text}
 
@@ -405,7 +537,6 @@ def get_job_logs(job_id: int, username: str = Depends(verify_credentials)):
 @app.get("/api/jobs/{job_id}/download")
 def download_job_output(
     job_id: int,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     job = crud.get_job(session, job_id)
@@ -432,7 +563,6 @@ def download_job_output(
 def job_events(
     job_id: int,
     request: Request,
-    username: str = Depends(verify_credentials),
 ):
     # Server-Sent Events streaming job status by polling DB and log
     def event_generator():
@@ -480,7 +610,6 @@ def job_events(
 @app.get("/api/jobs")
 def list_jobs(
     limit: int = 50,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     jobs = crud.list_jobs(session, limit=limit)
@@ -496,6 +625,52 @@ def get_presets():
         return data
     except Exception:
         return {}
+
+
+@app.get("/api/options")
+def get_media_options():
+    return {
+        "download": {
+            "formats": {key: sorted(value) for key, value in DOWNLOAD_FORMATS.items()},
+            "qualities": sorted(DOWNLOAD_QUALITIES),
+            "quality_presets": sorted(QUALITY_PRESETS),
+        },
+        "convert": {
+            "formats": {key: sorted(value) for key, value in CONVERT_FORMATS.items()},
+            "quality_presets": sorted(QUALITY_PRESETS),
+        },
+    }
+
+
+@app.post("/api/download/inspect")
+def inspect_download(
+    req: DownloadInspectRequest,
+):
+    url = req.url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL(
+            {
+                "quiet": True,
+                "skip_download": True,
+                "noplaylist": True,
+                "extract_flat": False,
+            }
+        ) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if isinstance(info, dict) and "entries" in info and info["entries"]:
+            info = info["entries"][0]
+        if not isinstance(info, dict):
+            raise ValueError("No media information returned")
+        return summarize_download_info(info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.info("Download inspection failed for %s: %s", url, e)
+        raise HTTPException(status_code=400, detail="Download analysis failed")
 
 
 @app.get("/api/compression/goals")
@@ -532,20 +707,14 @@ def api_get_profile(
 @app.get("/api/audit")
 def api_list_audit(
     limit: int = 100,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
-    # only admin users may list audit entries
-    user = crud.get_user_by_username(session, username)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Forbidden")
     return crud.list_audit_entries(session, limit=limit)
 
 
 @app.post("/api/flows")
 def create_flow_endpoint(
     flow: FlowCreate,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     f = crud.create_flow(session, flow.name, flow.steps, description=None)
@@ -554,7 +723,6 @@ def create_flow_endpoint(
 
 @app.get("/api/flows")
 def list_flows_endpoint(
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     fs = crud.list_flows(session)
@@ -564,7 +732,6 @@ def list_flows_endpoint(
 @app.get("/api/flows/{flow_id}")
 def get_flow_endpoint(
     flow_id: int,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     f = crud.get_flow(session, flow_id)
@@ -576,7 +743,6 @@ def get_flow_endpoint(
 @app.post("/api/flows/{flow_id}/run")
 def run_flow_endpoint(
     flow_id: int,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     flow = crud.get_flow(session, flow_id)
@@ -605,7 +771,6 @@ def run_flow_endpoint(
 def list_flow_runs_endpoint(
     flow_id: int,
     limit: int = 50,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     runs = crud.list_flow_runs(session, flow_id, limit=limit)
@@ -615,7 +780,6 @@ def list_flow_runs_endpoint(
 @app.get("/api/runs/{run_id}")
 def get_run_endpoint(
     run_id: int,
-    username: str = Depends(verify_credentials),
     session: Session = Depends(get_session),
 ):
     run = crud.get_flow_run(session, run_id)
@@ -628,7 +792,6 @@ def get_run_endpoint(
 def run_events(
     run_id: int,
     request: Request,
-    username: str = Depends(verify_credentials),
 ):
     # SSE streaming for a specific run: filter flow log lines for this run
     def event_generator():
@@ -690,7 +853,6 @@ def run_events(
 def flow_events(
     flow_id: int,
     request: Request,
-    username: str = Depends(verify_credentials),
 ):
     # SSE streaming for flow-level logs and status
     def event_generator():

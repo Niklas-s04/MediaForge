@@ -31,23 +31,6 @@ def update_job_status(session, job: Job, status: str, progress: int | None = Non
     return job
 
 
-def get_user_by_username(session, username: str):
-    from .models import User
-
-    statement = select(User).where(User.username == username)
-    return session.exec(statement).first()
-
-
-def create_user(session, username: str, hashed_password: str, is_admin: bool = False):
-    from .models import User
-
-    user = User(username=username, hashed_password=hashed_password, is_admin=is_admin)
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
-
-
 def append_job_log(job_id: int, text: str):
     import os
     logdir = os.environ.get('DATA_LOG_DIR', os.path.join(os.getcwd(), 'data', 'logs'))

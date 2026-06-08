@@ -84,6 +84,65 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
     assert "Conversion finished" in log_text
 
 
+def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
+    engine = create_test_engine(tmp_path)
+    log_dir = tmp_path / "logs"
+    tmp_root = tmp_path / "tmp"
+    output_dir = tmp_path / "output"
+    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("DATA_TMP_DIR", str(tmp_root))
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
+    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        job = worker.Job(
+            type="download",
+            input={
+                "url": "https://example.invalid/video",
+                "preset": "default",
+                "output_kind": "video",
+                "output_format": "webm",
+                "download_quality": "720p",
+                "quality_preset": "small",
+            },
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+
+    tmpdir = tmp_root / f"job-{job_id}"
+    downloaded = tmpdir / "video.mp4"
+    expected_output = output_dir / f"job-{job_id}.webm"
+    captured = {}
+
+    def fake_run(cmd, check, stdout, stderr, timeout):
+        captured["download_cmd"] = cmd
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        downloaded.write_bytes(b"fake-video")
+        return None
+
+    def fake_check_call(cmd, stdout, stderr):
+        captured["ffmpeg_cmd"] = cmd
+        output_dir.mkdir(parents=True, exist_ok=True)
+        expected_output.write_bytes(b"fake-webm")
+        return 0
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
+    monkeypatch.setattr(worker.glob, "glob", lambda pattern: [str(downloaded)])
+    monkeypatch.setattr(worker.os.path, "getsize", lambda path: Path(path).stat().st_size)
+
+    result = worker.process_download_and_convert(job_id)
+
+    assert result == {"output": str(expected_output)}
+    assert "height<=720" in captured["download_cmd"][2]
+    assert "-c:v" in captured["ffmpeg_cmd"]
+    assert "libvpx-vp9" in captured["ffmpeg_cmd"]
+    assert str(expected_output) == captured["ffmpeg_cmd"][-1]
+
+
 def test_process_convert_success(monkeypatch, tmp_path):
     engine = create_test_engine(tmp_path)
     log_dir = tmp_path / "logs"

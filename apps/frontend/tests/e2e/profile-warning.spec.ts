@@ -1,31 +1,7 @@
-import { test, expect } from '@playwright/test';
+﻿import { test, expect } from '@playwright/test';
 
-test('confirms aggressive profile warning through force job creation', async ({ page }) => {
+test('confirms small quality warning through force job creation', async ({ page }) => {
   const jobRequests: { force: string | null; body: any }[] = [];
-
-  page.on('console', (msg) => {
-    console.log('PW CONSOLE >', msg.type(), msg.text());
-  });
-  page.on('pageerror', (err) => {
-    console.log('PW PAGEERROR >', err.message, err.stack);
-  });
-
-  await page.route('**/api/compression/goals', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        families: {
-          audio: {
-            profiles: {
-              balanced: {},
-              small: {},
-            },
-          },
-        },
-      }),
-    });
-  });
 
   await page.route('**/api/compression/profile*', (route) => {
     const requestUrl = new URL(route.request().url());
@@ -35,25 +11,22 @@ test('confirms aggressive profile warning through force job creation', async ({ 
       contentType: 'application/json',
       body: JSON.stringify({
         profile,
-        family: 'audio',
+        family: requestUrl.searchParams.get('family'),
         warning: profile === 'small' ? 'Aggressive profile: noticeable quality loss possible.' : null,
       }),
     });
   });
 
-  await page.route('**/api/presets', (route) => {
+  await page.route('**/api/download/inspect', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ default: {} }),
-    });
-  });
-
-  await page.route('**/health', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ status: 'ok' }),
+      body: JSON.stringify({
+        title: 'Sample Video',
+        uploader: 'Example',
+        duration: 125,
+        formats: [{ height: 1080, ext: 'mp4', fps: 30 }],
+      }),
     });
   });
 
@@ -96,7 +69,7 @@ test('confirms aggressive profile warning through force job creation', async ({ 
     }
 
     await route.fulfill({
-      status: 201,
+      status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ id: 123, type: 'download', status: 'queued', progress: 0 }),
     });
@@ -106,15 +79,11 @@ test('confirms aggressive profile warning through force job creation', async ({ 
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
   await page.waitForSelector('text=MediaForge', { timeout: 60000 });
 
-  await page.fill('input[placeholder="user"]', 'admin');
-  await page.fill('input[placeholder="password"]', 'admin');
-  await page.click('button:has-text("Login")');
 
-  await page.fill('input[placeholder="https://..."]', 'https://example.invalid/sample.mp3');
-  await page.selectOption('[data-testid="compression-family"]', 'audio');
-  await page.selectOption('[data-testid="compression-profile"]', 'small');
+  await page.fill('input[placeholder="https://..."]', 'https://example.invalid/sample');
+  await page.click('[data-testid="quality-small"]');
 
-  await expect(page.locator('.warning')).toContainText('Aggressive');
+  await expect(page.locator('.warning-inline')).toContainText('Aggressive');
 
   await page.click('[data-testid="create-job"]');
   await expect(page.locator('.modal')).toBeVisible();
@@ -124,44 +93,19 @@ test('confirms aggressive profile warning through force job creation', async ({ 
 
   expect(jobRequests).toHaveLength(2);
   expect(jobRequests[0].force).toBeNull();
+  expect(jobRequests[0].body.input.output_kind).toBe('video');
+  expect(jobRequests[0].body.input.output_format).toBe('mp4');
+  expect(jobRequests[0].body.input.quality_preset).toBe('small');
   expect(jobRequests[0].body.input.compression_profile).toBe('small');
-  expect(jobRequests[0].body.input.lang).toBe('de');
   expect(jobRequests[1].force).toBe('true');
-  expect(jobRequests[1].body.input.compression_profile).toBe('small');
-  expect(jobRequests[1].body.input.lang).toBe('de');
 });
 
 test('clears selected local file after successful upload conversion', async ({ page }) => {
-  await page.route('**/api/compression/goals', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        families: {
-          audio: {
-            profiles: {
-              balanced: {},
-              small: {},
-            },
-          },
-        },
-      }),
-    });
-  });
-
   await page.route('**/api/compression/profile*', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ warning: null }),
-    });
-  });
-
-  await page.route('**/api/presets', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ default: {} }),
     });
   });
 
@@ -185,9 +129,6 @@ test('clears selected local file after successful upload conversion', async ({ p
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
   await page.waitForSelector('text=MediaForge', { timeout: 60000 });
 
-  await page.fill('input[placeholder="user"]', 'admin');
-  await page.fill('input[placeholder="password"]', 'admin');
-  await page.click('button:has-text("Login")');
   await page.click('button:has-text("Konvertieren")');
 
   await page.setInputFiles('#file-upload', {
@@ -195,11 +136,13 @@ test('clears selected local file after successful upload conversion', async ({ p
     mimeType: 'audio/wav',
     buffer: Buffer.from('fake-audio'),
   });
-  await expect(page.locator('text=sample.wav')).toBeVisible();
+  await expect(page.locator('.convert-card').getByText('sample.wav')).toBeVisible();
+  await expect(page.getByRole('button', { name: /MP3 Audio/ })).toBeVisible();
 
   await page.click('button:has-text("Konvertierung starten")');
 
   await expect(page.locator('text=Konvertierung gestartet: Auftrag #456')).toBeVisible();
   await expect(page.locator('text=sample.wav')).toHaveCount(0);
-  await expect(page.locator('text=Datei auswählen')).toBeVisible();
+  await expect(page.locator('text=Datei auswählen oder hier ablegen')).toBeVisible();
 });
+
