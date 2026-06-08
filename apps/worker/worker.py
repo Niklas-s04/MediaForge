@@ -57,6 +57,76 @@ def _get_engine():
     return create_engine(db_url, connect_args=connect_args)
 
 
+def _safe_stem(path: str | None, fallback: str) -> str:
+    stem = os.path.splitext(os.path.basename(path or ""))[0] or fallback
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem)
+    return cleaned.strip("._") or fallback
+
+
+def _profile_output_ext(family: str | None, profile: dict) -> str:
+    if family == "image":
+        return str(profile.get("format") or "webp").lstrip(".")
+    return str(profile.get("container") or "mp3").lstrip(".")
+
+
+def _build_convert_command(input_path: str, output_path: str, family: str | None, profile: dict):
+    strip_metadata = bool(profile.get("strip_metadata", True))
+    cmd = ["ffmpeg", "-y", "-i", input_path]
+
+    if family == "audio":
+        codec = profile.get("codec", "libmp3lame")
+        cmd += ["-vn", "-acodec", str(codec)]
+        if "bitrate" in profile:
+            cmd += ["-b:a", str(profile["bitrate"])]
+        else:
+            cmd += ["-q:a", str(profile.get("quality", 4))]
+    elif family == "video":
+        cmd += [
+            "-c:v",
+            str(profile.get("video_codec", "libx264")),
+            "-c:a",
+            str(profile.get("audio_codec", "aac")),
+            "-crf",
+            str(profile.get("crf", 28)),
+            "-movflags",
+            "+faststart",
+        ]
+        filters = []
+        max_width = profile.get("max_width")
+        max_height = profile.get("max_height")
+        max_fps = profile.get("max_fps")
+        if max_width and max_height:
+            filters.append(
+                f"scale=w='min({int(max_width)},iw)':h='min({int(max_height)},ih)':force_original_aspect_ratio=decrease"
+            )
+        if max_fps:
+            filters.append(f"fps={int(max_fps)}")
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+    elif family == "image":
+        fmt = str(profile.get("format", "webp"))
+        cmd += ["-frames:v", "1"]
+        max_width = profile.get("max_width")
+        max_height = profile.get("max_height")
+        if max_width and max_height:
+            cmd += [
+                "-vf",
+                f"scale=w='min({int(max_width)},iw)':h='min({int(max_height)},ih)':force_original_aspect_ratio=decrease",
+            ]
+        if fmt == "webp":
+            cmd += ["-quality", str(profile.get("quality", 82))]
+        else:
+            cmd += ["-q:v", str(profile.get("quality", 82))]
+    else:
+        cmd += ["-c", "copy"]
+
+    if strip_metadata:
+        cmd += ["-map_metadata", "-1"]
+
+    cmd.append(output_path)
+    return cmd
+
+
 # load presets from local file if available
 _PRESETS = {}
 try:
@@ -212,6 +282,105 @@ def process_download_and_convert(self, job_id: int):
                 if job2:
                     job2.status = 'failed'
                     job2.error_message = str(e)
+                    session2.add(job2)
+                    session2.commit()
+        except Exception:
+            pass
+
+
+@celery_app.task(bind=True, name="worker.process_convert")
+def process_convert(self, job_id: int):
+    """Convert a local uploaded file using the selected compression profile."""
+    engine = _get_engine()
+    try:
+        with Session(engine) as session:
+            stmt = select(Job).where(Job.id == job_id)
+            job = session.exec(stmt).first()
+            if not job:
+                _log(job_id, "Job not found in DB")
+                return
+
+            job.status = "running"
+            job.started_at = datetime.datetime.utcnow()
+            job.progress = 5
+            job.current_step = "Datei vorbereiten"
+            session.add(job)
+            session.commit()
+
+            input_obj = job.input or {}
+            input_path = input_obj.get("file_path") or input_obj.get("input_path")
+            if not input_path or not os.path.exists(input_path):
+                _log(job_id, "Input file not found")
+                job.status = "failed"
+                job.error_message = "input_file_not_found"
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+                return
+
+            outdir = os.environ.get("DATA_OUTPUT_DIR", "/data/output")
+            os.makedirs(outdir, exist_ok=True)
+
+            original_name = input_obj.get("original_filename") or input_path
+            profile_name = input_obj.get("compression_profile", "balanced")
+            try:
+                family = resolve_compression_family(
+                    mime_type=input_obj.get("mime_type"),
+                    file_name_or_ext=original_name,
+                )
+                profile = get_compression_profile(family, profile_name)
+            except Exception as e:
+                _log(job_id, f"Compression profile resolution failed: {e}")
+                job.status = "failed"
+                job.error_message = str(e)
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+                return
+
+            stem = _safe_stem(original_name, f"job-{job_id}")
+            ext = _profile_output_ext(family, profile)
+            outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{ext}")
+            cmd = _build_convert_command(input_path, outpath, family, profile)
+
+            _log(job_id, f"Starting local conversion: {input_path}")
+            _log(job_id, f"Compression decision: family={family} profile={profile_name} options={profile}")
+            job.progress = 35
+            job.current_step = "Konvertierung läuft"
+            session.add(job)
+            session.commit()
+
+            try:
+                subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                _log(job_id, f"Conversion failed: {e}")
+                job.status = "failed"
+                job.error_message = str(e)
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+                return
+
+            _log(job_id, f"Conversion finished: {outpath}")
+            job.progress = 100
+            job.status = "success"
+            job.current_step = "Fertig"
+            job.output_path = outpath
+            job.finished_at = datetime.datetime.utcnow()
+            session.add(job)
+            session.commit()
+            return {"output": outpath}
+    except Exception as e:
+        logging.exception("Unexpected local conversion worker error")
+        _log(job_id, f"Unexpected error: {e}")
+        try:
+            with Session(engine) as session2:
+                stmt2 = select(Job).where(Job.id == job_id)
+                job2 = session2.exec(stmt2).first()
+                if job2:
+                    job2.status = "failed"
+                    job2.error_message = str(e)
+                    job2.finished_at = datetime.datetime.utcnow()
                     session2.add(job2)
                     session2.commit()
         except Exception:

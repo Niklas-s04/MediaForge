@@ -106,7 +106,11 @@ test('confirms aggressive profile warning through force job creation', async ({ 
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
   await page.waitForSelector('text=MediaForge', { timeout: 60000 });
 
-  await page.fill('input[placeholder="url"]', 'https://example.invalid/sample.mp3');
+  await page.fill('input[placeholder="user"]', 'admin');
+  await page.fill('input[placeholder="password"]', 'admin');
+  await page.click('button:has-text("Login")');
+
+  await page.fill('input[placeholder="https://..."]', 'https://example.invalid/sample.mp3');
   await page.selectOption('[data-testid="compression-family"]', 'audio');
   await page.selectOption('[data-testid="compression-profile"]', 'small');
 
@@ -116,7 +120,7 @@ test('confirms aggressive profile warning through force job creation', async ({ 
   await expect(page.locator('.modal')).toBeVisible();
 
   await page.click('.modal button.confirm');
-  await expect(page.locator('text=Job created: 123')).toBeVisible();
+  await expect(page.locator('text=Download gestartet: Auftrag #123')).toBeVisible();
 
   expect(jobRequests).toHaveLength(2);
   expect(jobRequests[0].force).toBeNull();

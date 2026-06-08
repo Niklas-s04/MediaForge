@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -13,6 +13,8 @@ import secrets
 import os
 import time
 import json
+import shutil
+import uuid
 from fastapi.responses import StreamingResponse, FileResponse
 import logging
 from .compression_goals import (
@@ -52,6 +54,14 @@ def get_log_dir() -> str:
     return os.environ.get("DATA_LOG_DIR") or os.environ.get("LOG_DIR") or "/data/logs"
 
 
+def get_upload_dir() -> str:
+    return os.environ.get("DATA_UPLOAD_DIR") or "/data/uploads"
+
+
+def get_output_dir() -> str:
+    return os.environ.get("DATA_OUTPUT_DIR") or "/data/output"
+
+
 def get_resume_offset(request: Request) -> int:
     last_event_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
     try:
@@ -81,6 +91,101 @@ def verify_credentials(
     if not verified:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return user.username
+
+
+def safe_upload_filename(filename: str | None) -> str:
+    basename = os.path.basename(filename or "upload.bin")
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in basename)
+    return cleaned.strip("._") or "upload.bin"
+
+
+def infer_file_name_or_ext(input_obj: dict) -> str | None:
+    file_name_or_ext = input_obj.get("file_name") or input_obj.get("original_filename")
+    if file_name_or_ext:
+        return file_name_or_ext
+
+    url = input_obj.get("url")
+    if url:
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(url)
+            return os.path.basename(parsed.path)
+        except Exception:
+            return None
+
+    file_path = input_obj.get("file_path") or input_obj.get("input_path")
+    if file_path:
+        return os.path.basename(file_path)
+
+    return None
+
+
+def validate_compression_warning(
+    *,
+    payload: dict,
+    input_obj: dict,
+    username: str,
+    session: Session,
+    force: bool,
+    lang: str,
+):
+    effective_lang = input_obj.get("lang") or lang
+    profile_name = input_obj.get("compression_profile")
+    if not profile_name:
+        return
+
+    family = resolve_compression_family(
+        mime_type=input_obj.get("mime_type"),
+        file_name_or_ext=infer_file_name_or_ext(input_obj),
+    )
+    try:
+        prof = get_compression_profile(family, profile_name)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown compression profile '{profile_name}' for family '{family}'",
+        )
+
+    warning = summarize_profile_warning(prof, lang=effective_lang)
+    if warning and not force:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "warning": warning,
+                "message": "Use ?force=true to override",
+            },
+        )
+    if warning and force:
+        try:
+            audit_override(
+                payload=payload,
+                username=username,
+                profile=profile_name,
+                lang=effective_lang,
+            )
+        except Exception:
+            logger.exception("Failed to write override audit log")
+
+        try:
+            crud.create_audit_entry(
+                session,
+                username=username,
+                profile=profile_name,
+                payload=payload,
+                lang=effective_lang,
+            )
+        except Exception:
+            logger.exception("Failed to create override audit entry")
+
+
+def dispatch_job(job: models.Job):
+    if job.type == "download":
+        celery_app.send_task("worker.process_download_and_convert", args=[job.id])
+    elif job.type == "convert":
+        celery_app.send_task("worker.process_convert", args=[job.id])
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported job type '{job.type}'")
 
 
 @app.on_event("startup")
@@ -135,72 +240,14 @@ def create_job(
     # Server-side validation: if a compression_profile is provided, evaluate warnings
     try:
         input_obj = req.input or {}
-        effective_lang = input_obj.get("lang") or lang
-        profile_name = input_obj.get("compression_profile")
-
-        # try to infer filename/extension from provided fields
-        file_name_or_ext = input_obj.get("file_name")
-        if not file_name_or_ext:
-            # try to extract from URL path
-            url = input_obj.get("url")
-            if url:
-                try:
-                    from urllib.parse import urlparse
-
-                    parsed = urlparse(url)
-                    file_name_or_ext = os.path.basename(parsed.path)
-                except Exception:
-                    file_name_or_ext = None
-
-        if profile_name:
-            family = resolve_compression_family(
-                mime_type=input_obj.get("mime_type"),
-                file_name_or_ext=file_name_or_ext,
-            )
-            try:
-                prof = get_compression_profile(family, profile_name)
-            except KeyError:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown compression profile '{profile_name}' for family '{family}'",
-                )
-
-            warning = summarize_profile_warning(prof, lang=effective_lang)
-
-            if warning and not force:
-                # return 409 Conflict with human-readable warning and hint to force
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "warning": warning,
-                        "message": "Use ?force=true to override",
-                    },
-                )
-            elif warning and force:
-                # record audit entry for forced override (file + DB)
-                try:
-                    # record the original input payload to file (best-effort)
-                    audit_override(
-                        payload=req.dict(),
-                        username=username,
-                        profile=profile_name,
-                        lang=effective_lang,
-                    )
-                except Exception:
-                    logger.exception("Failed to write override audit log")
-
-                try:
-                    # also create a DB-backed audit entry
-                    crud.create_audit_entry(
-                        session,
-                        username=username,
-                        profile=profile_name,
-                        payload=req.dict(),
-                        lang=effective_lang,
-                    )
-                except Exception:
-                    # do not fail job creation if audit logging fails
-                    logger.exception("Failed to create override audit entry")
+        validate_compression_warning(
+            payload=req.dict(),
+            input_obj=input_obj,
+            username=username,
+            session=session,
+            force=force,
+            lang=lang,
+        )
 
     except HTTPException:
         raise
@@ -208,13 +255,83 @@ def create_job(
         # non-fatal: continue to job creation if validation fails unexpectedly
         logger.exception("Unexpected compression validation error")
 
+    if req.type not in ("download", "convert"):
+        raise HTTPException(status_code=400, detail=f"Unsupported job type '{req.type}'")
+
     job = crud.create_job(session, req.type, req.input)
 
     # Dispatch worker task to process this job
     try:
-        celery_app.send_task("worker.process_download_and_convert", args=[job.id])
+        dispatch_job(job)
+    except HTTPException:
+        raise
     except Exception:
         # If dispatch fails, keep job in queued state
+        logger.exception("Failed to dispatch worker task for job %s", job.id)
+
+    return JobRead(
+        id=job.id,
+        type=job.type,
+        status=job.status,
+        progress=job.progress,
+        current_step=job.current_step,
+        output_path=job.output_path,
+    )
+
+
+@app.post("/api/jobs/convert-upload", response_model=JobRead)
+def create_convert_upload_job(
+    file: UploadFile = File(...),
+    preset: str = Form("default"),
+    compression_family: str = Form("audio"),
+    compression_profile: str = Form("balanced"),
+    lang: str = Form("de"),
+    force: bool = False,
+    username: str = Depends(verify_credentials),
+    session: Session = Depends(get_session),
+):
+    input_obj = {
+        "source": "upload",
+        "preset": preset,
+        "compression_profile": compression_profile,
+        "lang": lang,
+        "mime_type": file.content_type or f"{compression_family}/x-mediaforge",
+        "original_filename": file.filename,
+    }
+    payload = {"type": "convert", "input": input_obj}
+
+    try:
+        validate_compression_warning(
+            payload=payload,
+            input_obj=input_obj,
+            username=username,
+            session=session,
+            force=force,
+            lang=lang,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unexpected compression validation error")
+
+    upload_dir = get_upload_dir()
+    os.makedirs(upload_dir, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}-{safe_upload_filename(file.filename)}"
+    upload_path = os.path.join(upload_dir, filename)
+
+    try:
+        with open(upload_path, "wb") as target:
+            shutil.copyfileobj(file.file, target)
+    except Exception:
+        logger.exception("Failed to store upload")
+        raise HTTPException(status_code=500, detail="Failed to store uploaded file")
+
+    input_obj["file_path"] = upload_path
+    job = crud.create_job(session, "convert", input_obj)
+
+    try:
+        dispatch_job(job)
+    except Exception:
         logger.exception("Failed to dispatch worker task for job %s", job.id)
 
     return JobRead(
@@ -243,6 +360,32 @@ def get_job(
 def get_job_logs(job_id: int, username: str = Depends(verify_credentials)):
     text = crud.read_job_log(job_id)
     return {"job_id": job_id, "log": text}
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download_job_output(
+    job_id: int,
+    username: str = Depends(verify_credentials),
+    session: Session = Depends(get_session),
+):
+    job = crud.get_job(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != "success" or not job.output_path:
+        raise HTTPException(status_code=409, detail="Job output is not ready")
+
+    output_dir = os.path.realpath(get_output_dir())
+    output_path = os.path.realpath(job.output_path)
+    if output_path != output_dir and not output_path.startswith(output_dir + os.sep):
+        raise HTTPException(status_code=403, detail="Output path is outside the download directory")
+    if not os.path.exists(output_path) or not os.path.isfile(output_path):
+        raise HTTPException(status_code=404, detail="Output file not found")
+
+    return FileResponse(
+        output_path,
+        media_type="application/octet-stream",
+        filename=os.path.basename(output_path),
+    )
 
 
 @app.get("/api/jobs/{job_id}/events")

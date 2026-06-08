@@ -69,7 +69,7 @@ export default function ProfileSelector({
   return (
     <div className="profile-selector">
       <div className="profile-control">
-        <label>Family</label>
+        <label>Medientyp</label>
         <select value={family} onChange={(e) => onFamilyChange(e.target.value)} data-testid="compression-family">
           {families.map((f) => (
             <option key={f} value={f}>
@@ -80,7 +80,7 @@ export default function ProfileSelector({
       </div>
 
       <div className="profile-control">
-        <label>Profile</label>
+        <label>Profil</label>
         <select value={profile} onChange={(e) => onProfileChange(e.target.value)} data-testid="compression-profile">
           {profiles.map((p) => (
             <option key={p} value={p}>

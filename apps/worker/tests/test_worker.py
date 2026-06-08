@@ -84,6 +84,59 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
     assert "Conversion finished" in log_text
 
 
+def test_process_convert_success(monkeypatch, tmp_path):
+    engine = create_test_engine(tmp_path)
+    log_dir = tmp_path / "logs"
+    output_dir = tmp_path / "output"
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    input_file = upload_dir / "sample.wav"
+    input_file.write_bytes(b"fake-audio")
+
+    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
+    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        job = worker.Job(
+            type="convert",
+            input={
+                "file_path": str(input_file),
+                "original_filename": "sample.wav",
+                "mime_type": "audio/wav",
+                "compression_profile": "balanced",
+            },
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+
+    expected_output = output_dir / f"job-{job_id}-sample.mp3"
+
+    def fake_check_call(cmd, stdout, stderr):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        expected_output.write_bytes(b"fake-mp3")
+        return 0
+
+    monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
+
+    result = worker.process_convert(job_id)
+
+    assert result == {"output": str(expected_output)}
+    with Session(engine) as session:
+        saved = session.exec(select(worker.Job).where(worker.Job.id == job_id)).first()
+        assert saved is not None
+        assert saved.status == "success"
+        assert saved.output_path == str(expected_output)
+        assert saved.finished_at is not None
+
+    log_text = (log_dir / f"job-{job_id}.log").read_text(encoding="utf-8")
+    assert "Starting local conversion" in log_text
+    assert "Conversion finished" in log_text
+
+
 def test_run_flow_creates_job_and_completes(monkeypatch, tmp_path):
     engine = create_test_engine(tmp_path)
     log_dir = tmp_path / "logs"
