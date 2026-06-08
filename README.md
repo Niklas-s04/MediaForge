@@ -1,51 +1,52 @@
 # MediaForge
 
-MediaForge ist ein kleiner, selbst gehosteter Media-Download- und Konvertierungs-Hub.
+MediaForge is a small self-hosted media download and conversion hub.
 
-Enthalten sind:
+It includes:
 
-- FastAPI-Backend mit Basic Auth, Jobs, Flows und SSE-Logstreams
-- Celery-Worker fuer Downloads und ffmpeg-Konvertierung
-- React/Vite-Frontend, das vom API-Container ausgeliefert wird
-- Redis als Broker und SQLite als einfache lokale Datenbank
+- FastAPI backend with Basic Auth, jobs, flows and SSE log streaming
+- Celery worker for downloads and ffmpeg conversion
+- React/Vite frontend served by the API container
+- Redis as the task broker
+- SQLite as the default local database
 
-## Voraussetzungen
+## Requirements
 
-- Docker Desktop oder Docker Engine mit Docker Compose
-- Node.js 18+ fuer Frontend-Entwicklung
-- Python 3.11 fuer Backend- und Worker-Tests
+- Docker Desktop or Docker Engine with Docker Compose
+- Node.js 18+ for frontend development
+- Python 3.11 for backend and worker tests
 
-## Schnellstart mit Docker
+## Quick Start With Docker
 
-Beispiel-Konfiguration kopieren und Passwort anpassen:
+Copy the example environment file and change the password:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Stack bauen und starten:
+Build and start the stack:
 
 ```powershell
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-App oeffnen:
+Open the app:
 
 ```text
 http://localhost:8787
 ```
 
-Healthcheck:
+Health check:
 
 ```powershell
 Invoke-RestMethod http://localhost:8787/health
 ```
 
-Der Compose-Login ist standardmaessig `admin` / `change-me`. Vor Nutzung ausserhalb lokaler Tests unbedingt `ADMIN_PASSWORD` in `.env` aendern.
+The default Compose login is `admin` / `change-me`. Change `ADMIN_PASSWORD` in `.env` before using the app outside local testing.
 
-## Konfiguration
+## Configuration
 
-Wichtige Umgebungsvariablen:
+Important environment variables:
 
 ```text
 API_PORT=8787
@@ -58,11 +59,11 @@ REDIS_URL=redis://redis:6379/0
 DATA_LOG_DIR=/data/logs
 ```
 
-Laufzeitdaten liegen lokal unter `data/` und im Container unter `/data`. Dieser Ordner wird nicht zu GitHub hochgeladen.
+Runtime files are stored in `data/` locally and mounted as `/data` inside the containers. This directory is ignored by Git.
 
-## Lokale Entwicklung
+## Local Development
 
-Backend- und Worker-Tests:
+Backend and worker tests:
 
 ```powershell
 $env:PYTHONPATH = (Get-Location).Path
@@ -87,37 +88,37 @@ npx playwright test --config=playwright.config.ts
 
 ## Docker
 
-Das API-Image baut das Frontend selbst und kopiert es nach `/app/static`. `apps/frontend/dist` muss deshalb nicht committed werden.
+The API image builds the frontend and copies it to `/app/static`. You do not need to commit `apps/frontend/dist`.
 
-Vor einem Deployment pruefen:
+Checks before deployment:
 
 ```powershell
 docker compose -f docker/docker-compose.yml config
 docker compose -f docker/docker-compose.yml build api worker
 ```
 
-## Was gehoert ins Repository?
+## Repository Contents
 
-Committen:
+Commit:
 
-- Quellcode unter `apps/`
-- Docker-Dateien unter `docker/` und die App-Dockerfiles
-- Tests, Dokumentation und GitHub Actions
+- source code under `apps/`
+- Docker files under `docker/` and app Dockerfiles
+- tests, documentation and GitHub Actions
 - `.env.example`
 
-Nicht committen:
+Do not commit:
 
-- `.env` oder Secrets
-- `data/`, SQLite-Datenbanken, Logs und generierte Mediendateien
-- `node_modules/`, `dist/`, Playwright-Reports und Python-Virtualenvs
+- `.env` or secrets
+- `data/`, SQLite databases, logs or generated media files
+- `node_modules/`, `dist/`, Playwright reports or Python virtual environments
 
-## Struktur
+## Structure
 
 ```text
-apps/api       FastAPI-App, Modelle, Schemas, Tests
-apps/worker    Celery-Worker und Worker-Tests
-apps/frontend  React/Vite-Frontend und E2E-Tests
-docker          Docker-Compose-Stack
-docs            Notizen und Risiko-Dokumentation
-scripts         Lokale Recovery-/Hilfsskripte
+apps/api       FastAPI app, models, schemas and tests
+apps/worker    Celery worker and worker tests
+apps/frontend  React/Vite frontend and E2E tests
+docker          Docker Compose stack
+docs            Notes and risk documentation
+scripts         Local recovery/helper scripts
 ```
