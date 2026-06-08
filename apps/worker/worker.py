@@ -96,8 +96,9 @@ def process_download_and_convert(self, job_id: int):
                 session.commit()
                 return
 
-            tmpdir = f"/data/tmp/job-{job_id}"
-            outdir = f"/data/output"
+            tmp_root = os.environ.get('DATA_TMP_DIR', '/data/tmp')
+            outdir = os.environ.get('DATA_OUTPUT_DIR', '/data/output')
+            tmpdir = os.path.join(tmp_root, f"job-{job_id}")
             os.makedirs(tmpdir, exist_ok=True)
             os.makedirs(outdir, exist_ok=True)
 

@@ -35,7 +35,11 @@ def test_worker_uses_shared_api_models():
 def test_process_download_and_convert_success(monkeypatch, tmp_path):
     engine = create_test_engine(tmp_path)
     log_dir = tmp_path / "logs"
+    tmp_root = tmp_path / "tmp"
+    output_dir = tmp_path / "output"
     monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("DATA_TMP_DIR", str(tmp_root))
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
     monkeypatch.setattr(worker, "_get_engine", lambda: engine)
 
@@ -46,10 +50,9 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
         session.refresh(job)
         job_id = job.id
 
-    tmpdir = tmp_path / f"tmp/job-{job_id}"
-    output_dir = tmp_path / "output"
+    tmpdir = tmp_root / f"job-{job_id}"
     downloaded = tmpdir / "audio.mp3"
-    expected_output = os.path.join("/data/output", f"job-{job_id}.mp3")
+    expected_output = str(output_dir / f"job-{job_id}.mp3")
 
     def fake_run(cmd, check, stdout, stderr, timeout):
         tmpdir.mkdir(parents=True, exist_ok=True)
