@@ -12,6 +12,9 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:-sqlite:////data/db.sqlite3}
       - DATA_LOG_DIR=${DATA_LOG_DIR:-/data/logs}
+      - DATA_UPLOAD_DIR=${DATA_UPLOAD_DIR:-/data/uploads}
+      - DATA_OUTPUT_DIR=${DATA_OUTPUT_DIR:-/data/output}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-2147483648}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-change-me}
     volumes:
@@ -30,6 +33,8 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - DATABASE_URL=${DATABASE_URL:-sqlite:////data/db.sqlite3}
       - DATA_LOG_DIR=${DATA_LOG_DIR:-/data/logs}
+      - DATA_UPLOAD_DIR=${DATA_UPLOAD_DIR:-/data/uploads}
+      - DATA_OUTPUT_DIR=${DATA_OUTPUT_DIR:-/data/output}
     command: ["celery", "-A", "apps.worker.worker:celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-2}"]
     volumes:
       - ../data:/data

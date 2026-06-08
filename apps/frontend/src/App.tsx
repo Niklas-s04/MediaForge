@@ -191,6 +191,7 @@ function App() {
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
   const [message, setMessage] = useState<string | null>(null)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const presetNames = useMemo(() => Object.keys(presets || {}), [presets])
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) || null, [jobs, selectedId])
@@ -331,6 +332,7 @@ function App() {
       if (r.ok) {
         const created = await r.json()
         setSelectedFile(null)
+        if (fileInputRef.current) fileInputRef.current.value = ''
         setPendingWarning(null)
         setMessage(`Konvertierung gestartet: Auftrag #${created.id}`)
         setSelectedId(created.id)
@@ -480,6 +482,7 @@ function App() {
                 <div className="upload-area">
                   <input
                     id="file-upload"
+                    ref={fileInputRef}
                     type="file"
                     onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
                   />

@@ -130,3 +130,76 @@ test('confirms aggressive profile warning through force job creation', async ({ 
   expect(jobRequests[1].body.input.compression_profile).toBe('small');
   expect(jobRequests[1].body.input.lang).toBe('de');
 });
+
+test('clears selected local file after successful upload conversion', async ({ page }) => {
+  await page.route('**/api/compression/goals', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        families: {
+          audio: {
+            profiles: {
+              balanced: {},
+              small: {},
+            },
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ warning: null }),
+    });
+  });
+
+  await page.route('**/api/presets', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ default: {} }),
+    });
+  });
+
+  await page.route('**/api/jobs/convert-upload*', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ id: 456, type: 'convert', status: 'queued', progress: 0 }),
+    });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([]),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.waitForSelector('text=MediaForge', { timeout: 60000 });
+
+  await page.fill('input[placeholder="user"]', 'admin');
+  await page.fill('input[placeholder="password"]', 'admin');
+  await page.click('button:has-text("Login")');
+  await page.click('button:has-text("Konvertieren")');
+
+  await page.setInputFiles('#file-upload', {
+    name: 'sample.wav',
+    mimeType: 'audio/wav',
+    buffer: Buffer.from('fake-audio'),
+  });
+  await expect(page.locator('text=sample.wav')).toBeVisible();
+
+  await page.click('button:has-text("Konvertierung starten")');
+
+  await expect(page.locator('text=Konvertierung gestartet: Auftrag #456')).toBeVisible();
+  await expect(page.locator('text=sample.wav')).toHaveCount(0);
+  await expect(page.locator('text=Datei auswählen')).toBeVisible();
+});

@@ -94,6 +94,7 @@ def test_process_convert_success(monkeypatch, tmp_path):
     input_file.write_bytes(b"fake-audio")
 
     monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("DATA_UPLOAD_DIR", str(upload_dir))
     monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
     monkeypatch.setattr(worker, "_get_engine", lambda: engine)
@@ -102,6 +103,7 @@ def test_process_convert_success(monkeypatch, tmp_path):
         job = worker.Job(
             type="convert",
             input={
+                "source": "upload",
                 "file_path": str(input_file),
                 "original_filename": "sample.wav",
                 "mime_type": "audio/wav",
@@ -125,6 +127,7 @@ def test_process_convert_success(monkeypatch, tmp_path):
     result = worker.process_convert(job_id)
 
     assert result == {"output": str(expected_output)}
+    assert not input_file.exists()
     with Session(engine) as session:
         saved = session.exec(select(worker.Job).where(worker.Job.id == job_id)).first()
         assert saved is not None
@@ -135,6 +138,93 @@ def test_process_convert_success(monkeypatch, tmp_path):
     log_text = (log_dir / f"job-{job_id}.log").read_text(encoding="utf-8")
     assert "Starting local conversion" in log_text
     assert "Conversion finished" in log_text
+
+
+def test_process_convert_rejects_path_outside_upload_dir(monkeypatch, tmp_path):
+    engine = create_test_engine(tmp_path)
+    log_dir = tmp_path / "logs"
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    outside_file = tmp_path / "outside.wav"
+    outside_file.write_bytes(b"fake-audio")
+
+    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("DATA_UPLOAD_DIR", str(upload_dir))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
+    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        job = worker.Job(
+            type="convert",
+            input={
+                "source": "upload",
+                "file_path": str(outside_file),
+                "original_filename": "outside.wav",
+                "mime_type": "audio/wav",
+                "compression_profile": "balanced",
+            },
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+
+    result = worker.process_convert(job_id)
+
+    assert result is None
+    assert outside_file.exists()
+    with Session(engine) as session:
+        saved = session.exec(select(worker.Job).where(worker.Job.id == job_id)).first()
+        assert saved is not None
+        assert saved.status == "failed"
+        assert saved.error_message == "invalid_upload_source"
+
+
+def test_process_convert_failure_cleans_uploaded_source(monkeypatch, tmp_path):
+    engine = create_test_engine(tmp_path)
+    log_dir = tmp_path / "logs"
+    output_dir = tmp_path / "output"
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    input_file = upload_dir / "broken.wav"
+    input_file.write_bytes(b"fake-audio")
+
+    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("DATA_UPLOAD_DIR", str(upload_dir))
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
+    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
+
+    with Session(engine) as session:
+        job = worker.Job(
+            type="convert",
+            input={
+                "source": "upload",
+                "file_path": str(input_file),
+                "original_filename": "broken.wav",
+                "mime_type": "audio/wav",
+                "compression_profile": "balanced",
+            },
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+
+    def fake_check_call(cmd, stdout, stderr):
+        raise RuntimeError("ffmpeg failed")
+
+    monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
+
+    result = worker.process_convert(job_id)
+
+    assert result is None
+    assert not input_file.exists()
+    with Session(engine) as session:
+        saved = session.exec(select(worker.Job).where(worker.Job.id == job_id)).first()
+        assert saved is not None
+        assert saved.status == "failed"
+        assert "ffmpeg failed" in saved.error_message
 
 
 def test_run_flow_creates_job_and_completes(monkeypatch, tmp_path):

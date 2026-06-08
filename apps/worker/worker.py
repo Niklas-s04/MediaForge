@@ -57,6 +57,28 @@ def _get_engine():
     return create_engine(db_url, connect_args=connect_args)
 
 
+def _get_upload_dir() -> str:
+    return os.environ.get("DATA_UPLOAD_DIR", "/data/uploads")
+
+
+def _is_path_inside(base_dir: str, target_path: str) -> bool:
+    base = os.path.realpath(base_dir)
+    target = os.path.realpath(target_path)
+    return target == base or target.startswith(base + os.sep)
+
+
+def _remove_upload_source(path: str | None):
+    if not path:
+        return
+    if not _is_path_inside(_get_upload_dir(), path):
+        return
+    try:
+        if os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        logging.exception("Failed to remove uploaded source file %s", path)
+
+
 def _safe_stem(path: str | None, fallback: str) -> str:
     stem = os.path.splitext(os.path.basename(path or ""))[0] or fallback
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem)
@@ -292,6 +314,7 @@ def process_download_and_convert(self, job_id: int):
 def process_convert(self, job_id: int):
     """Convert a local uploaded file using the selected compression profile."""
     engine = _get_engine()
+    upload_source_to_cleanup = None
     try:
         with Session(engine) as session:
             stmt = select(Job).where(Job.id == job_id)
@@ -309,6 +332,15 @@ def process_convert(self, job_id: int):
 
             input_obj = job.input or {}
             input_path = input_obj.get("file_path") or input_obj.get("input_path")
+            if input_obj.get("source") != "upload" or not input_path or not _is_path_inside(_get_upload_dir(), input_path):
+                _log(job_id, "Invalid upload source")
+                job.status = "failed"
+                job.error_message = "invalid_upload_source"
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+                return
+            upload_source_to_cleanup = input_path
             if not input_path or not os.path.exists(input_path):
                 _log(job_id, "Input file not found")
                 job.status = "failed"
@@ -385,6 +417,8 @@ def process_convert(self, job_id: int):
                     session2.commit()
         except Exception:
             pass
+    finally:
+        _remove_upload_source(upload_source_to_cleanup)
 
 
 @celery_app.task(bind=True, name="worker.run_flow")

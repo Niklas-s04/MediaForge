@@ -13,7 +13,6 @@ import secrets
 import os
 import time
 import json
-import shutil
 import uuid
 from fastapi.responses import StreamingResponse, FileResponse
 import logging
@@ -62,6 +61,21 @@ def get_output_dir() -> str:
     return os.environ.get("DATA_OUTPUT_DIR") or "/data/output"
 
 
+def get_max_upload_bytes() -> int:
+    raw = os.environ.get("MAX_UPLOAD_BYTES", "2147483648")
+    try:
+        value = int(raw)
+    except Exception:
+        value = 2147483648
+    return max(1, value)
+
+
+def is_path_inside(base_dir: str, target_path: str) -> bool:
+    base = os.path.realpath(base_dir)
+    target = os.path.realpath(target_path)
+    return target == base or target.startswith(base + os.sep)
+
+
 def get_resume_offset(request: Request) -> int:
     last_event_id = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
     try:
@@ -97,6 +111,43 @@ def safe_upload_filename(filename: str | None) -> str:
     basename = os.path.basename(filename or "upload.bin")
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in basename)
     return cleaned.strip("._") or "upload.bin"
+
+
+def store_upload_file(file: UploadFile, upload_dir: str, max_bytes: int) -> str:
+    os.makedirs(upload_dir, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}-{safe_upload_filename(file.filename)}"
+    upload_path = os.path.join(upload_dir, filename)
+    if not is_path_inside(upload_dir, upload_path):
+        raise HTTPException(status_code=400, detail="Invalid upload path")
+
+    written = 0
+    try:
+        with open(upload_path, "wb") as target:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(status_code=413, detail="Uploaded file is too large")
+                target.write(chunk)
+    except HTTPException:
+        try:
+            if os.path.exists(upload_path):
+                os.remove(upload_path)
+        except Exception:
+            logger.exception("Failed to remove oversized upload")
+        raise
+    except Exception:
+        try:
+            if os.path.exists(upload_path):
+                os.remove(upload_path)
+        except Exception:
+            logger.exception("Failed to remove partial upload")
+        logger.exception("Failed to store upload")
+        raise HTTPException(status_code=500, detail="Failed to store uploaded file")
+
+    return upload_path
 
 
 def infer_file_name_or_ext(input_obj: dict) -> str | None:
@@ -255,7 +306,7 @@ def create_job(
         # non-fatal: continue to job creation if validation fails unexpectedly
         logger.exception("Unexpected compression validation error")
 
-    if req.type not in ("download", "convert"):
+    if req.type != "download":
         raise HTTPException(status_code=400, detail=f"Unsupported job type '{req.type}'")
 
     job = crud.create_job(session, req.type, req.input)
@@ -314,18 +365,7 @@ def create_convert_upload_job(
     except Exception:
         logger.exception("Unexpected compression validation error")
 
-    upload_dir = get_upload_dir()
-    os.makedirs(upload_dir, exist_ok=True)
-    filename = f"{uuid.uuid4().hex}-{safe_upload_filename(file.filename)}"
-    upload_path = os.path.join(upload_dir, filename)
-
-    try:
-        with open(upload_path, "wb") as target:
-            shutil.copyfileobj(file.file, target)
-    except Exception:
-        logger.exception("Failed to store upload")
-        raise HTTPException(status_code=500, detail="Failed to store uploaded file")
-
+    upload_path = store_upload_file(file, get_upload_dir(), get_max_upload_bytes())
     input_obj["file_path"] = upload_path
     job = crud.create_job(session, "convert", input_obj)
 
