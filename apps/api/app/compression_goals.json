@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "families": {
+    "audio": {
+      "description": "Audio compression profiles for size-first delivery.",
+      "mime_prefixes": ["audio/"],
+      "extensions": ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"],
+      "profiles": {
+        "balanced": {
+          "target": "Small download size with acceptable speech/music quality.",
+          "container": "mp3",
+          "codec": "libmp3lame",
+          "bitrate": "128k",
+          "quality": 4,
+          "strip_metadata": true
+        },
+        "small": {
+          "target": "Aggressive size reduction for mobile delivery.",
+          "container": "mp3",
+          "codec": "libmp3lame",
+          "bitrate": "96k",
+          "quality": 6,
+          "strip_metadata": true
+        }
+      }
+    },
+    "video": {
+      "description": "Video compression profiles for web and storage savings.",
+      "mime_prefixes": ["video/"],
+      "extensions": ["mp4", "mkv", "mov", "webm", "avi", "m4v"],
+      "profiles": {
+        "balanced": {
+          "target": "Web-friendly output with moderate quality retention.",
+          "container": "mp4",
+          "video_codec": "libx264",
+          "audio_codec": "aac",
+          "crf": 28,
+          "max_width": 1280,
+          "max_height": 720,
+          "max_fps": 30,
+          "strip_metadata": true
+        },
+        "small": {
+          "target": "Smaller files for preview and sync.",
+          "container": "mp4",
+          "video_codec": "libx264",
+          "audio_codec": "aac",
+          "crf": 32,
+          "max_width": 960,
+          "max_height": 540,
+          "max_fps": 24,
+          "strip_metadata": true
+        }
+      }
+    },
+    "image": {
+      "description": "Image compression profiles for storage and web previews.",
+      "mime_prefixes": ["image/"],
+      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff"],
+      "profiles": {
+        "balanced": {
+          "target": "Keep visual quality while shrinking file size.",
+          "format": "webp",
+          "quality": 82,
+          "max_width": 1920,
+          "max_height": 1920,
+          "strip_metadata": true
+        },
+        "small": {
+          "target": "Aggressive compression for thumbnails and sync.",
+          "format": "webp",
+          "quality": 72,
+          "max_width": 1280,
+          "max_height": 1280,
+          "strip_metadata": true
+        }
+      }
+    }
+  },
+  "fallback": {
+    "family": "archive",
+    "policy": "lossless_archive"
+  }
+}

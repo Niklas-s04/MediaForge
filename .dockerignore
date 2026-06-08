@@ -1,0 +1,40 @@
+# VCS and local config
+.git
+.github
+.env
+.env.*
+!.env.example
+
+# Python local artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.venv-*/
+venv/
+env/
+
+# Frontend artifacts restored/built inside Docker
+apps/frontend/node_modules/
+apps/frontend/dist/
+apps/frontend/playwright-report/
+apps/frontend/test-results/
+
+# Runtime data and generated media
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Scratch / local previews
+tmp_*
+index_preview.html
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

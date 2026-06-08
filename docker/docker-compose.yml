@@ -1,0 +1,47 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    container_name: nas_convert_api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8787}:8787"
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////data/db.sqlite3}
+      - DATA_LOG_DIR=${DATA_LOG_DIR:-/data/logs}
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-change-me}
+    volumes:
+      - ../data:/data
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    container_name: nas_convert_worker
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////data/db.sqlite3}
+      - DATA_LOG_DIR=${DATA_LOG_DIR:-/data/logs}
+    command: ["celery", "-A", "apps.worker.worker:celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-2}"]
+    volumes:
+      - ../data:/data
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: nas_convert_redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:

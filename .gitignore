@@ -1,0 +1,41 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.venv-*/
+venv/
+env/
+
+# Node / frontend
+apps/frontend/node_modules/
+apps/frontend/dist/
+apps/frontend/playwright-report/
+apps/frontend/test-results/
+node_modules/
+dist/
+build/
+
+# Runtime data and generated media
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Local generated previews / scratch files
+tmp_*
+index_preview.html
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

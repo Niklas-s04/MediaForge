@@ -1,0 +1,23 @@
+{
+  "default": {
+    "format": "bestaudio/best",
+    "ffmpeg": { "codec": "libmp3lame", "quality": "2" },
+    "download_timeout": 300,
+    "retries": 3,
+    "backoff": 2
+  },
+  "mp3_high_quality": {
+    "format": "bestaudio/best",
+    "ffmpeg": { "codec": "libmp3lame", "quality": "0" },
+    "download_timeout": 600,
+    "retries": 4,
+    "backoff": 2
+  },
+  "audio_small": {
+    "format": "bestaudio[abr<128]/bestaudio/best",
+    "ffmpeg": { "codec": "libmp3lame", "quality": "5" },
+    "download_timeout": 180,
+    "retries": 2,
+    "backoff": 2
+  }
+}

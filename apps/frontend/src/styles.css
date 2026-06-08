@@ -1,0 +1,17 @@
+body { font-family: system-ui, Arial, sans-serif; margin: 0; padding: 1rem; }
+.app { max-width: 760px; margin: 0 auto; }
+.row { margin: 0.5rem 0; display: flex; gap: 1rem; align-items: center; }
+label { width: 100px; }
+select { padding: 0.4rem; }
+.warning { margin-top: 1rem; padding: 0.75rem; background: #fff4e5; border: 1px solid #ffcc80; color: #663c00; }
+.ok { margin-top: 1rem; padding: 0.5rem; color: #036; }
+
+/* modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; }
+.modal { background: #fff; padding: 1rem; width: 90%; max-width: 560px; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,0.2); }
+.modal header h3 { margin: 0 0 0.5rem 0 }
+.modal-body { margin-bottom: 0.75rem }
+.modal footer { display:flex; gap: 0.5rem; justify-content:flex-end }
+.modal button { padding: 0.5rem 0.75rem }
+.modal button.confirm { background: #0066cc; color: white; border: none }
+

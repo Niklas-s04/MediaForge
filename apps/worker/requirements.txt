@@ -1,0 +1,10 @@
+celery[redis]==5.3.1
+# Use a recent available yt-dlp release (2024.05.26 exists on PyPI)
+yt-dlp==2024.5.26
+# latest ffmpeg-python release available on PyPI is 0.2.0
+ffmpeg-python==0.2.0
+sqlmodel==0.0.8
+python-dotenv==1.0.0
+# SQLAlchemy 2.x may be incompatible with sqlmodel 0.0.8; pin to 1.4.x to be safe
+sqlalchemy==1.4.41
+
