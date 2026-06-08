@@ -104,7 +104,7 @@ test('confirms aggressive profile warning through force job creation', async ({ 
 
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
-  await page.waitForSelector('text=NAS Convert Hub', { timeout: 60000 });
+  await page.waitForSelector('text=MediaForge', { timeout: 60000 });
 
   await page.fill('input[placeholder="url"]', 'https://example.invalid/sample.mp3');
   await page.selectOption('[data-testid="compression-family"]', 'audio');
@@ -112,7 +112,7 @@ test('confirms aggressive profile warning through force job creation', async ({ 
 
   await expect(page.locator('.warning')).toContainText('Aggressive');
 
-  await page.click('button:has-text("Create Job")');
+  await page.click('[data-testid="create-job"]');
   await expect(page.locator('.modal')).toBeVisible();
 
   await page.click('.modal button.confirm');

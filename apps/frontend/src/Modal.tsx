@@ -11,8 +11,8 @@ type Props = {
 
 export default function Modal({ title, children, onClose, onConfirm, cancelLabel, confirmLabel }: Props) {
   return (
-    <div className="modal-overlay">
-      <div className="modal">
+    <div className="modal-overlay" role="presentation">
+      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
         <header>
           <h3>{title}</h3>
         </header>
@@ -23,7 +23,7 @@ export default function Modal({ title, children, onClose, onConfirm, cancelLabel
           ) : null}
           {onConfirm ? (
             <button className="confirm" onClick={onConfirm}>
-              {confirmLabel || 'Bestätigen'}
+              {confirmLabel || 'Bestatigen'}
             </button>
           ) : null}
         </footer>

@@ -64,11 +64,11 @@ export default function ProfileSelector({
       .catch(() => onWarningChange(null))
   }, [family, profile, lang, onWarningChange])
 
-  if (!goals) return <div>Lade Komprimierungsziele...</div>
+  if (!goals) return <div className="message">Lade Komprimierungsziele...</div>
 
   return (
     <div className="profile-selector">
-      <div className="row">
+      <div className="profile-control">
         <label>Family</label>
         <select value={family} onChange={(e) => onFamilyChange(e.target.value)} data-testid="compression-family">
           {families.map((f) => (
@@ -79,7 +79,7 @@ export default function ProfileSelector({
         </select>
       </div>
 
-      <div className="row">
+      <div className="profile-control">
         <label>Profile</label>
         <select value={profile} onChange={(e) => onProfileChange(e.target.value)} data-testid="compression-profile">
           {profiles.map((p) => (
@@ -90,7 +90,7 @@ export default function ProfileSelector({
         </select>
       </div>
 
-      <div className="row">
+      <div className="profile-control">
         <label>Sprache</label>
         <select value={lang} onChange={(e) => onLangChange(e.target.value as 'de' | 'en')} data-testid="compression-lang">
           <option value="de">Deutsch</option>

@@ -24,7 +24,7 @@ from .compression_goals import (
 from .audit import audit_override
 
 
-app = FastAPI(title="NAS Convert & Download Hub - API")
+app = FastAPI(title="MediaForge API")
 logger = logging.getLogger(__name__)
 
 # Serve frontend static assets if mounted into the container at /app/static
