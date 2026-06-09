@@ -24,16 +24,36 @@ DEFAULT_FORMATS = {
     "video": "mp4",
     "image": "webp",
 }
+IMAGE_FORMATS = {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff", "tif"}
+VIDEO_CODECS = {
+    "libx264",
+    "libx265",
+    "libvpx",
+    "libvpx-vp9",
+    "libaom-av1",
+    "libsvtav1",
+    "librav1e",
+    "mpeg4",
+    "libxvid",
+    "mpeg2video",
+    "msmpeg4v3",
+}
+AUDIO_CODECS = {"aac", "libopus", "libmp3lame", "libvorbis", "mp2", "flac", "alac", "wmav2"}
+CRF_VIDEO_CODECS = {"libx264", "libx265", "libvpx", "libvpx-vp9", "libaom-av1", "libsvtav1", "librav1e"}
+LEGACY_VIDEO_QSCALE = {"high": "3", "balanced": "5", "small": "8"}
 FORMAT_CODECS = {
     "audio": {
         "mp3": {"codec": "libmp3lame", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
         "m4a": {"codec": "aac", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
         "aac": {"codec": "aac", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
         "ogg": {"codec": "libvorbis", "bitrate": {"high": "224k", "balanced": "160k", "small": "96k"}},
+        "oga": {"codec": "libvorbis", "bitrate": {"high": "224k", "balanced": "160k", "small": "96k"}},
         "opus": {"codec": "libopus", "bitrate": {"high": "192k", "balanced": "128k", "small": "80k"}},
         "wav": {"codec": "pcm_s16le"},
         "flac": {"codec": "flac"},
         "aiff": {"codec": "pcm_s16be"},
+        "alac": {"codec": "alac"},
+        "wma": {"codec": "wmav2", "bitrate": {"high": "192k", "balanced": "128k", "small": "96k"}},
     },
     "video": {
         "mp4": {"video_codec": "libx264", "audio_codec": "aac"},
@@ -44,6 +64,11 @@ FORMAT_CODECS = {
         "avi": {"video_codec": "mpeg4", "audio_codec": "libmp3lame"},
         "mpg": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
         "mpeg": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
+        "flv": {"video_codec": "libx264", "audio_codec": "aac"},
+        "wmv": {"video_codec": "msmpeg4v3", "audio_codec": "wmav2"},
+        "ogv": {"video_codec": "libvpx", "audio_codec": "libvorbis"},
+        "ts": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
+        "vob": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
     },
 }
 _PROGRESS_WRITE_STATE: dict[int, dict[str, float | int]] = {}
@@ -445,7 +470,7 @@ def _build_media_command(
         format_config = FORMAT_CODECS["audio"].get(output_format) or FORMAT_CODECS["audio"]["mp3"]
         codec = _choice_option(
             options.get("audio_codec"),
-            {"libmp3lame", "aac", "libopus", "libvorbis", "pcm_s16le", "pcm_s16be", "flac"},
+            {"libmp3lame", "aac", "libopus", "libvorbis", "pcm_s16le", "pcm_s16be", "flac", "alac", "wmav2"},
             str(format_config["codec"]),
         )
         cmd += ["-vn", "-acodec", codec]
@@ -463,31 +488,30 @@ def _build_media_command(
         settings = VIDEO_QUALITY[quality]
         video_codec = _choice_option(
             options.get("video_codec"),
-            {"libx264", "libx265", "libvpx-vp9", "mpeg4", "mpeg2video"},
+            VIDEO_CODECS,
             str(format_config["video_codec"]),
         )
         audio_codec = _choice_option(
             options.get("audio_codec"),
-            {"aac", "libopus", "libmp3lame", "libvorbis", "mp2"},
+            AUDIO_CODECS,
             str(format_config["audio_codec"]),
         )
         crf = _int_option(options.get("crf"), settings["crf"], minimum=0, maximum=51)
-        cmd += [
-            "-c:v",
-            video_codec,
-            "-c:a",
-            audio_codec,
-            "-crf",
-            str(crf),
-        ]
-        if output_format == "webm":
+        cmd += ["-c:v", video_codec, "-c:a", audio_codec]
+        if video_codec in CRF_VIDEO_CODECS:
+            cmd += ["-crf", str(crf)]
+        elif output_format not in {"mpg", "mpeg", "ts", "vob"}:
+            cmd += ["-q:v", LEGACY_VIDEO_QSCALE[quality]]
+        if video_codec in {"libvpx", "libvpx-vp9"}:
             cmd += ["-b:v", "0"]
-        elif output_format in {"mpg", "mpeg"}:
+        elif output_format in {"mpg", "mpeg", "ts", "vob"}:
             cmd += ["-q:v", "4"]
-        else:
+        elif video_codec in {"libx264", "libx265"}:
             cmd += ["-preset", "medium"]
-            if output_format == "mp4":
+            if output_format in {"mp4", "m4v"}:
                 cmd += ["-movflags", "+faststart"]
+        elif output_format in {"mp4", "m4v"}:
+            cmd += ["-movflags", "+faststart"]
         filters = []
         max_width = _int_option(options.get("max_width"), settings.get("max_width"), minimum=16, maximum=7680)
         max_height = _int_option(options.get("max_height"), None, minimum=16, maximum=4320)
@@ -526,6 +550,9 @@ def _build_media_command(
 
     if strip_metadata:
         cmd += ["-map_metadata", "-1"]
+
+    if family == "audio" and output_format == "alac":
+        cmd += ["-f", "ipod"]
 
     cmd.append(output_path)
     return cmd
@@ -822,7 +849,7 @@ def process_convert(self, job_id: int):
             family = requested_family if requested_family in allowed_output_families else source_family
             output_format = _clean_choice(
                 input_obj.get("output_format"),
-                set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff"},
+                set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else IMAGE_FORMATS,
                 DEFAULT_FORMATS.get(family, "mp3"),
             )
             strip_metadata = bool(input_obj.get("strip_metadata", True))

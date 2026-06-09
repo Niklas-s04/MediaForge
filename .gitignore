@@ -6,22 +6,30 @@
 # Python
 __pycache__/
 *.py[cod]
+.coverage
+coverage.xml
+htmlcov/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
 .venv/
 .venv-*/
 venv/
 env/
+pip-wheel-metadata/
 
 # Node / frontend
 apps/frontend/node_modules/
 apps/frontend/dist/
+apps/frontend/.vite/
 apps/frontend/playwright-report/
 apps/frontend/test-results/
+apps/frontend/coverage/
 node_modules/
 dist/
 build/
+coverage/
 
 # Runtime data and generated media
 data/
@@ -29,9 +37,18 @@ data/
 *.sqlite3
 *.db
 *.log
+*.pid
+celerybeat-schedule*
+dump.rdb
+
+# Docker / local compose overrides
+docker-compose.override.yml
+docker/*.override.yml
 
 # Local generated previews / scratch files
 tmp_*
+temp/
+tmp/
 index_preview.html
 
 # OS / editor
@@ -39,3 +56,5 @@ index_preview.html
 Thumbs.db
 .vscode/
 .idea/
+*.swp
+*.swo

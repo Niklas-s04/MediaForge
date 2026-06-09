@@ -43,12 +43,16 @@ DATABASE_URL
 REDIS_URL
 DATA_LOG_DIR
 DATA_UPLOAD_DIR
+DATA_OUTPUT_DIR
 MAX_UPLOAD_BYTES
+OUTPUT_RETENTION_HOURS
+OUTPUT_CLEANUP_INTERVAL_SECONDS
 ```
 
 ## 4. Data And Backups
 
 - SQLite database, logs, temporary files and generated media live under `data/`.
+- Generated output files are deleted after `OUTPUT_RETENTION_HOURS` and expired jobs are hidden from the default frontend lists.
 - Back up `data/db.sqlite3` before updates.
 - Do not commit `data/` to GitHub.
 

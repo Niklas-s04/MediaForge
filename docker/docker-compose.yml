@@ -15,6 +15,8 @@ services:
       - DATA_UPLOAD_DIR=${DATA_UPLOAD_DIR:-/data/uploads}
       - DATA_OUTPUT_DIR=${DATA_OUTPUT_DIR:-/data/output}
       - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-2147483648}
+      - OUTPUT_RETENTION_HOURS=${OUTPUT_RETENTION_HOURS:-24}
+      - OUTPUT_CLEANUP_INTERVAL_SECONDS=${OUTPUT_CLEANUP_INTERVAL_SECONDS:-3600}
     volumes:
       - ../data:/data
     depends_on:

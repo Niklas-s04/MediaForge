@@ -181,12 +181,71 @@ def test_build_media_command_supports_extended_formats():
     ogg_cmd = worker._build_media_command("in.wav", "out.ogg", "audio", "ogg", "balanced", True, {})
     assert "libvorbis" in ogg_cmd
 
+    oga_cmd = worker._build_media_command("in.wav", "out.oga", "audio", "oga", "balanced", True, {})
+    assert "libvorbis" in oga_cmd
+
+    alac_cmd = worker._build_media_command("in.wav", "out.alac", "audio", "alac", "balanced", True, {})
+    assert "alac" in alac_cmd
+    assert "ipod" in alac_cmd
+
+    wma_cmd = worker._build_media_command("in.wav", "out.wma", "audio", "wma", "balanced", True, {})
+    assert "wmav2" in wma_cmd
+
     avi_cmd = worker._build_media_command("in.mp4", "out.avi", "video", "avi", "balanced", True, {})
     assert "mpeg4" in avi_cmd
     assert "libmp3lame" in avi_cmd
 
+    wmv_cmd = worker._build_media_command("in.mp4", "out.wmv", "video", "wmv", "balanced", True, {})
+    assert "msmpeg4v3" in wmv_cmd
+    assert "wmav2" in wmv_cmd
+
+    ogv_cmd = worker._build_media_command("in.mp4", "out.ogv", "video", "ogv", "balanced", True, {})
+    assert "libvpx" in ogv_cmd
+    assert "libvorbis" in ogv_cmd
+
+    ts_cmd = worker._build_media_command("in.mp4", "out.ts", "video", "ts", "balanced", True, {})
+    assert "mpeg2video" in ts_cmd
+    assert "mp2" in ts_cmd
+
     avif_cmd = worker._build_media_command("in.png", "out.avif", "image", "avif", "balanced", True, {})
     assert "libaom-av1" in avif_cmd
+
+
+def test_build_media_command_accepts_added_codec_options():
+    av1_cmd = worker._build_media_command(
+        "in.mp4",
+        "out.mp4",
+        "video",
+        "mp4",
+        "balanced",
+        True,
+        {"video_codec": "libaom-av1", "audio_codec": "alac"},
+    )
+    assert "libaom-av1" in av1_cmd
+    assert "alac" in av1_cmd
+
+    vp8_cmd = worker._build_media_command(
+        "in.mp4",
+        "out.webm",
+        "video",
+        "webm",
+        "balanced",
+        True,
+        {"video_codec": "libvpx"},
+    )
+    assert "libvpx" in vp8_cmd
+    assert "-b:v" in vp8_cmd
+
+    wma_cmd = worker._build_media_command(
+        "in.wav",
+        "out.wma",
+        "audio",
+        "wma",
+        "balanced",
+        True,
+        {"audio_codec": "wmav2"},
+    )
+    assert "wmav2" in wma_cmd
 
 
 def test_download_progress_hook_maps_known_and_unknown_totals():

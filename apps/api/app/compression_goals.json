@@ -4,7 +4,7 @@
     "audio": {
       "description": "Audio compression profiles for size-first delivery.",
       "mime_prefixes": ["audio/"],
-      "extensions": ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff", "aif"],
+      "extensions": ["mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus", "aiff", "aif", "alac", "wma"],
       "profiles": {
         "balanced": {
           "target": "Small download size with acceptable speech/music quality.",
@@ -27,7 +27,7 @@
     "video": {
       "description": "Video compression profiles for web and storage savings.",
       "mime_prefixes": ["video/"],
-      "extensions": ["mp4", "mkv", "mov", "webm", "avi", "m4v", "mpg", "mpeg"],
+      "extensions": ["mp4", "mkv", "mov", "webm", "avi", "m4v", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"],
       "profiles": {
         "balanced": {
           "target": "Web-friendly output with moderate quality retention.",
@@ -56,7 +56,7 @@
     "image": {
       "description": "Image compression profiles for storage and web previews.",
       "mime_prefixes": ["image/"],
-      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff", "tif"],
+      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff", "tif", "heic", "heif"],
       "profiles": {
         "balanced": {
           "target": "Keep visual quality while shrinking file size.",

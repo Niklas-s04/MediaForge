@@ -2,15 +2,17 @@ from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, 
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from .db import create_db_and_tables, get_session
+from .db import create_db_and_tables, engine, get_session
 from . import crud, models
 from .schemas import JobCreate, JobRead, FlowCreate, FlowRead, FlowRunRead
 from .celery_app import celery_app
-from sqlmodel import Session
+from sqlmodel import Session, select
+from datetime import datetime, timedelta
 import os
 import time
 import json
 import uuid
+import threading
 from fastapi.responses import StreamingResponse, FileResponse
 import logging
 from .compression_goals import (
@@ -27,16 +29,17 @@ logger = logging.getLogger(__name__)
 
 
 DOWNLOAD_FORMATS = {
-    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac", "aiff"},
-    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg"},
+    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "aiff", "alac", "wma"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"},
 }
 CONVERT_FORMATS = {
-    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac", "aiff"},
-    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg"},
-    "image": {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff"},
+    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "aiff", "alac", "wma"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"},
+    "image": {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff", "tif"},
 }
 QUALITY_PRESETS = {"high", "balanced", "small"}
 DOWNLOAD_QUALITIES = {"best", "1080p", "720p", "480p", "360p"}
+_cleanup_thread_started = False
 
 
 class DownloadInspectRequest(BaseModel):
@@ -81,10 +84,96 @@ def get_max_upload_bytes() -> int:
     return max(1, value)
 
 
+def get_output_retention_hours() -> float:
+    raw = os.environ.get("OUTPUT_RETENTION_HOURS", "24")
+    try:
+        value = float(raw)
+    except Exception:
+        value = 24.0
+    return max(0.0, value)
+
+
+def get_output_cleanup_interval_seconds() -> int:
+    raw = os.environ.get("OUTPUT_CLEANUP_INTERVAL_SECONDS", "3600")
+    try:
+        value = int(raw)
+    except Exception:
+        value = 3600
+    return max(0, value)
+
+
 def is_path_inside(base_dir: str, target_path: str) -> bool:
     base = os.path.realpath(base_dir)
     target = os.path.realpath(target_path)
     return target == base or target.startswith(base + os.sep)
+
+
+def expire_old_job_outputs(session: Session, now: datetime | None = None) -> int:
+    retention_hours = get_output_retention_hours()
+    if retention_hours <= 0:
+        return 0
+
+    cutoff = (now or datetime.utcnow()) - timedelta(hours=retention_hours)
+    output_dir = os.path.realpath(get_output_dir())
+    statement = select(models.Job).where(
+        models.Job.status == "success",
+        models.Job.output_path.is_not(None),
+        models.Job.finished_at.is_not(None),
+        models.Job.finished_at <= cutoff,
+    )
+    expired = 0
+    for job in session.exec(statement).all():
+        if not job.output_path:
+            continue
+        output_path = os.path.realpath(job.output_path)
+        if not is_path_inside(output_dir, output_path):
+            logger.warning("Skipping expired job %s with output outside DATA_OUTPUT_DIR", job.id)
+            continue
+        if os.path.exists(output_path):
+            if not os.path.isfile(output_path):
+                logger.warning("Skipping expired job %s because output is not a file", job.id)
+                continue
+            try:
+                os.remove(output_path)
+            except Exception:
+                logger.exception("Failed to remove expired output for job %s", job.id)
+                continue
+
+        job.status = "expired"
+        job.output_path = None
+        job.current_step = "Ausgabedatei nach 24h gelöscht"
+        session.add(job)
+        expired += 1
+
+    if expired:
+        session.commit()
+    return expired
+
+
+def _run_output_cleanup_once():
+    try:
+        with Session(engine) as session:
+            expire_old_job_outputs(session)
+    except Exception:
+        logger.exception("Output cleanup failed")
+
+
+def _output_cleanup_loop():
+    while True:
+        interval = get_output_cleanup_interval_seconds()
+        if interval <= 0:
+            return
+        time.sleep(interval)
+        _run_output_cleanup_once()
+
+
+def start_output_cleanup_thread():
+    global _cleanup_thread_started
+    if _cleanup_thread_started or get_output_cleanup_interval_seconds() <= 0:
+        return
+    _cleanup_thread_started = True
+    thread = threading.Thread(target=_output_cleanup_loop, name="output-cleanup", daemon=True)
+    thread.start()
 
 
 def get_resume_offset(request: Request) -> int:
@@ -362,6 +451,8 @@ def dispatch_job(job: models.Job):
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+    _run_output_cleanup_once()
+    start_output_cleanup_thread()
 
 
 @app.get("/health")
@@ -542,6 +633,8 @@ def download_job_output(
     job = crud.get_job(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.status == "expired":
+        raise HTTPException(status_code=410, detail="Job output expired")
     if job.status != "success" or not job.output_path:
         raise HTTPException(status_code=409, detail="Job output is not ready")
 
@@ -607,7 +700,7 @@ def job_events(
             yield f"id: {offset}\n"
             yield f"data: {json.dumps(payload)}\n\n"
 
-            if status in ("success", "failed", "cancelled", "notfound"):
+            if status in ("success", "failed", "cancelled", "expired", "notfound"):
                 break
 
             # heartbeat / poll interval
@@ -619,9 +712,11 @@ def job_events(
 @app.get("/api/jobs")
 def list_jobs(
     limit: int = 50,
+    include_expired: bool = False,
     session: Session = Depends(get_session),
 ):
-    jobs = crud.list_jobs(session, limit=limit)
+    expire_old_job_outputs(session)
+    jobs = crud.list_jobs(session, limit=limit, include_expired=include_expired)
     return jobs
 
 

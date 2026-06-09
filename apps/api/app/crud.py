@@ -16,8 +16,10 @@ def get_job(session, job_id: int) -> Job | None:
     return result
 
 
-def list_jobs(session, limit: int = 50):
+def list_jobs(session, limit: int = 50, include_expired: bool = False):
     statement = select(Job).order_by(Job.created_at.desc()).limit(limit)
+    if not include_expired:
+        statement = select(Job).where(Job.status != "expired").order_by(Job.created_at.desc()).limit(limit)
     return session.exec(statement).all()
 
 

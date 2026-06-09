@@ -282,3 +282,73 @@ test('downloads finished output with unknown response length', async ({ page }) 
   await expect(page.locator('.transfer-progress')).toContainText('100%');
 });
 
+test('closes the format picker when clicking outside of it', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4', 'webm', 'wmv'], audio: ['mp3', 'alac'] } },
+        convert: { formats: { video: ['mp4'], audio: ['mp3'], image: ['webp'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+
+  await page.getByRole('button', { name: /MP4 Video/ }).click();
+  await expect(page.locator('.format-menu')).toBeVisible();
+  await expect(page.getByRole('button', { name: /WMV/ })).toBeVisible();
+
+  await page.locator('.format-categories').getByRole('button', { name: 'Audio' }).click();
+  await expect(page.getByRole('button', { name: /ALAC/ })).toBeVisible();
+
+  await page.locator('.url-row input').click();
+  await expect(page.locator('.format-menu')).toHaveCount(0);
+});
+
+test('hides expired jobs from the frontend lists', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: { formats: { video: ['mp4'], audio: ['mp3'], image: ['webp'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { id: 11, type: 'convert', status: 'expired', progress: 100, current_step: 'Ausgabedatei nach 24h gelöscht', output_path: null },
+        { id: 12, type: 'convert', status: 'success', progress: 100, current_step: 'Fertig', output_path: '/data/output/job-12.mp3' },
+      ]),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+
+  await expect(page.getByText('#11 Konvertierung')).toHaveCount(0);
+  await expect(page.getByText('#12 Konvertierung')).toBeVisible();
+  await expect(page.getByText('Auftrag #12')).toBeVisible();
+  await expect(page.getByText('Auftrag #11')).toHaveCount(0);
+});
+

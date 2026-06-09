@@ -65,7 +65,7 @@ type AdvancedValues = {
   image_quality: string
 }
 
-const terminalStatuses = ['success', 'failed', 'cancelled', 'notfound']
+const terminalStatuses = ['success', 'failed', 'cancelled', 'expired', 'notfound']
 
 const formatCatalog: Record<MediaFamily, FormatDef[]> = {
   video: [
@@ -77,6 +77,11 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'video', value: 'avi', label: 'AVI', text: 'Älterer Container für Legacy-Software' },
     { family: 'video', value: 'mpg', label: 'MPG', text: 'MPEG-2 für ältere Player und DVD-Tools' },
     { family: 'video', value: 'mpeg', label: 'MPEG', text: 'Kompatibler MPEG-2-Container' },
+    { family: 'video', value: 'flv', label: 'FLV', text: 'Flash-Container für ältere Web-Archive' },
+    { family: 'video', value: 'wmv', label: 'WMV', text: 'Windows-Media-Container für Legacy-Geräte' },
+    { family: 'video', value: 'ogv', label: 'OGV', text: 'Offenes Ogg-Videoformat' },
+    { family: 'video', value: 'ts', label: 'TS', text: 'MPEG-Transportstream für Broadcasts' },
+    { family: 'video', value: 'vob', label: 'VOB', text: 'DVD-kompatibler MPEG-Container' },
   ],
   audio: [
     { family: 'audio', value: 'mp3', label: 'MP3', text: 'Maximale Kompatibilität' },
@@ -87,6 +92,9 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'audio', value: 'wav', label: 'WAV', text: 'Unkomprimiert für Schnittprogramme' },
     { family: 'audio', value: 'flac', label: 'FLAC', text: 'Verlustfrei komprimiert' },
     { family: 'audio', value: 'aiff', label: 'AIFF', text: 'Unkomprimiert für Audio-Workstations' },
+    { family: 'audio', value: 'alac', label: 'ALAC', text: 'Apple Lossless für Musikarchive' },
+    { family: 'audio', value: 'wma', label: 'WMA', text: 'Windows-Media-Audio für ältere Geräte' },
+    { family: 'audio', value: 'oga', label: 'OGA', text: 'Ogg-Audio mit Vorbis-Codec' },
   ],
   image: [
     { family: 'image', value: 'webp', label: 'WebP', text: 'Klein, modern und webfreundlich' },
@@ -97,6 +105,7 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'image', value: 'gif', label: 'GIF', text: 'Einzelbild oder einfache Web-Grafik' },
     { family: 'image', value: 'bmp', label: 'BMP', text: 'Unkomprimiert für ältere Anwendungen' },
     { family: 'image', value: 'tiff', label: 'TIFF', text: 'Druck, Scan und Archiv' },
+    { family: 'image', value: 'tif', label: 'TIF', text: 'TIFF-Variante für Scan-Workflows' },
   ],
 }
 
@@ -295,6 +304,7 @@ function FormatPicker({
 }) {
   const [query, setQuery] = useState('')
   const [activeFamily, setActiveFamily] = useState<MediaFamily>(selectedFamily)
+  const pickerRef = useRef<HTMLDivElement>(null)
   const selected = findFormat(catalog, selectedFamily, selectedFormat)
   const formats = catalog[activeFamily].filter((format) => {
     const haystack = `${format.label} ${format.text}`.toLowerCase()
@@ -305,8 +315,19 @@ function FormatPicker({
     if (!families.includes(activeFamily)) setActiveFamily(families[0])
   }, [families, activeFamily])
 
+  useEffect(() => {
+    if (!open) return
+
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) onOpenChange(false)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsidePointerDown)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointerDown)
+  }, [open, onOpenChange])
+
   return (
-    <div className="format-picker">
+    <div className="format-picker" ref={pickerRef}>
       <button className="format-button" type="button" onClick={() => onOpenChange(!open)}>
         <span>{selected.label}</span>
         <small>{familyLabels[selected.family]}</small>
@@ -423,9 +444,15 @@ function AdvancedOptions({
               <option value="">Automatisch</option>
               <option value="libx264">H.264</option>
               <option value="libx265">H.265 / HEVC</option>
+              <option value="libaom-av1">AV1</option>
+              <option value="libsvtav1">AV1 / SVT</option>
+              <option value="librav1e">AV1 / rav1e</option>
+              <option value="libvpx">VP8</option>
               <option value="libvpx-vp9">VP9</option>
               <option value="mpeg4">MPEG-4 Part 2</option>
+              <option value="libxvid">Xvid</option>
               <option value="mpeg2video">MPEG-2</option>
+              <option value="msmpeg4v3">MS MPEG-4</option>
             </select>
           </label>
           <label className="field">
@@ -437,6 +464,8 @@ function AdvancedOptions({
               <option value="libmp3lame">MP3</option>
               <option value="libvorbis">Vorbis</option>
               <option value="mp2">MP2</option>
+              <option value="alac">ALAC</option>
+              <option value="wmav2">WMA</option>
             </select>
           </label>
           <label className="field">
@@ -469,6 +498,8 @@ function AdvancedOptions({
               <option value="libopus">Opus</option>
               <option value="libvorbis">Vorbis</option>
               <option value="flac">FLAC</option>
+              <option value="alac">ALAC</option>
+              <option value="wmav2">WMA</option>
               <option value="pcm_s16le">PCM WAV</option>
               <option value="pcm_s16be">PCM AIFF</option>
             </select>
@@ -766,7 +797,7 @@ function App() {
         return
       }
       const d = await r.json()
-      setJobs(Array.isArray(d) ? d : [])
+      setJobs(Array.isArray(d) ? d.filter((job) => (job.status || '').toLowerCase() !== 'expired') : [])
     } catch (e) {
       setJobs([])
     }
