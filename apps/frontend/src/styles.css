@@ -827,6 +827,97 @@ h2 {
   background: #eef5ff;
 }
 
+.transfer-progress,
+.detail-progress {
+  padding: 0 1.1rem;
+}
+
+.transfer-progress {
+  margin: 0.1rem 0 0.9rem;
+}
+
+.progress-meter {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+  background: var(--surface-soft);
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 760;
+}
+
+.progress-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-meta strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-track,
+.list-progress {
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--convert-chip-bg);
+}
+
+.progress-track {
+  height: 9px;
+}
+
+.progress-track span,
+.list-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  transition: width 180ms ease;
+}
+
+.progress-meter.indeterminate .progress-track span,
+.list-progress i.indeterminate {
+  width: 38% !important;
+  animation: progress-sweep 1.15s ease-in-out infinite;
+}
+
+.progress-meter small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.list-progress {
+  display: block;
+  width: 100%;
+  height: 5px;
+}
+
+@keyframes progress-sweep {
+  0% {
+    transform: translateX(-115%);
+  }
+
+  50% {
+    transform: translateX(35%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
+}
+
 .item-list,
 .download-list {
   display: grid;

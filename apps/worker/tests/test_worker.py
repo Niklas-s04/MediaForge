@@ -54,9 +54,25 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
     downloaded = tmpdir / "audio.mp3"
     expected_output = str(output_dir / f"job-{job_id}.mp3")
 
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            downloaded.write_bytes(b"fake-audio")
+            for hook in self.options["progress_hooks"]:
+                hook({"status": "downloading", "downloaded_bytes": 5, "total_bytes": 10, "speed": 1000, "eta": 1})
+                hook({"status": "finished"})
+            return 0
+
     def fake_run(cmd, check, stdout, stderr, timeout):
-        tmpdir.mkdir(parents=True, exist_ok=True)
-        downloaded.write_bytes(b"fake-audio")
         return None
 
     def fake_check_call(cmd, stdout, stderr):
@@ -64,6 +80,7 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
         (output_dir / f"job-{job_id}.mp3").write_bytes(b"fake-mp3")
         return 0
 
+    monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", FakeYoutubeDL, raising=False)
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
     monkeypatch.setattr(worker.glob, "glob", lambda pattern: [str(downloaded)])
@@ -117,10 +134,26 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
     expected_output = output_dir / f"job-{job_id}.webm"
     captured = {}
 
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+            captured["ydl_options"] = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            tmpdir.mkdir(parents=True, exist_ok=True)
+            downloaded.write_bytes(b"fake-video")
+            for hook in self.options["progress_hooks"]:
+                hook({"status": "downloading", "downloaded_bytes": 1, "total_bytes_estimate": 2})
+                hook({"status": "finished"})
+            return 0
+
     def fake_run(cmd, check, stdout, stderr, timeout):
-        captured["download_cmd"] = cmd
-        tmpdir.mkdir(parents=True, exist_ok=True)
-        downloaded.write_bytes(b"fake-video")
         return None
 
     def fake_check_call(cmd, stdout, stderr):
@@ -129,6 +162,7 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
         expected_output.write_bytes(b"fake-webm")
         return 0
 
+    monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", FakeYoutubeDL, raising=False)
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
     monkeypatch.setattr(worker.glob, "glob", lambda pattern: [str(downloaded)])
@@ -137,10 +171,52 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
     result = worker.process_download_and_convert(job_id)
 
     assert result == {"output": str(expected_output)}
-    assert "height<=720" in captured["download_cmd"][2]
+    assert "height<=720" in captured["ydl_options"]["format"]
     assert "-c:v" in captured["ffmpeg_cmd"]
     assert "libvpx-vp9" in captured["ffmpeg_cmd"]
     assert str(expected_output) == captured["ffmpeg_cmd"][-1]
+
+
+def test_build_media_command_supports_extended_formats():
+    ogg_cmd = worker._build_media_command("in.wav", "out.ogg", "audio", "ogg", "balanced", True, {})
+    assert "libvorbis" in ogg_cmd
+
+    avi_cmd = worker._build_media_command("in.mp4", "out.avi", "video", "avi", "balanced", True, {})
+    assert "mpeg4" in avi_cmd
+    assert "libmp3lame" in avi_cmd
+
+    avif_cmd = worker._build_media_command("in.png", "out.avif", "image", "avif", "balanced", True, {})
+    assert "libaom-av1" in avif_cmd
+
+
+def test_download_progress_hook_maps_known_and_unknown_totals():
+    progress, step = worker._download_progress_from_hook(
+        {"status": "downloading", "downloaded_bytes": 50, "total_bytes": 100, "speed": 2048, "eta": 4},
+        attempt=1,
+        retries=3,
+    )
+    assert progress == 23
+    assert "50 KB" in step or "1 KB" in step
+    assert "verbleibend" in step
+
+    unknown_progress, unknown_step = worker._download_progress_from_hook(
+        {"status": "downloading", "downloaded_bytes": 4096},
+        attempt=2,
+        retries=3,
+    )
+    assert unknown_progress == 10
+    assert "Groesse unbekannt" in unknown_step
+
+    finished_progress, finished_step = worker._download_progress_from_hook({"status": "finished"}, attempt=1, retries=3)
+    assert finished_progress == 38
+    assert "abgeschlossen" in finished_step
+
+
+def test_ffmpeg_progress_parser_handles_supported_and_bad_lines():
+    assert worker._parse_ffmpeg_progress_seconds("out_time_ms=2500000") == 2.5
+    assert worker._parse_ffmpeg_progress_seconds("out_time=01:02:03.50") == 3723.5
+    assert worker._parse_ffmpeg_progress_seconds("out_time_ms=bad", current=7.0) == 7.0
+    assert worker._parse_ffmpeg_progress_seconds("progress=end", current=9.0) == 9.0
 
 
 def test_process_convert_success(monkeypatch, tmp_path):

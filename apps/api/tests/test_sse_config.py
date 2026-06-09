@@ -73,7 +73,7 @@ def test_job_events_uses_data_log_dir_and_resume_offset(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
 
     with Session(engine) as session:
-        job = Job(type="download", status="success", input={})
+        job = Job(type="download", status="success", progress=100, current_step="Fertig", input={})
         session.add(job)
         session.commit()
         session.refresh(job)
@@ -87,6 +87,8 @@ def test_job_events_uses_data_log_dir_and_resume_offset(monkeypatch, tmp_path):
 
     assert "id: 13" in text
     assert '"status": "success"' in text
+    assert '"progress": 100' in text
+    assert '"current_step": "Fertig"' in text
     assert '"chunk": "resumed"' in text
 
 

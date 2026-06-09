@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from 'react'
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Modal from './Modal'
 
 type Job = {
@@ -19,6 +19,29 @@ type FormatDef = {
   label: string
   family: MediaFamily
   text: string
+}
+
+type TransferPhase = 'upload' | 'download' | 'convert'
+
+type TransferState = {
+  phase: TransferPhase
+  jobId?: number
+  loaded: number
+  total?: number
+  startedAt: number
+  progress: number
+  etaSeconds?: number | null
+  indeterminate?: boolean
+  label: string
+}
+
+type OptionsResponse = {
+  download?: {
+    formats?: Partial<Record<MediaFamily, string[]>>
+  }
+  convert?: {
+    formats?: Partial<Record<MediaFamily, string[]>>
+  }
 }
 
 type InspectInfo = {
@@ -49,18 +72,31 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'video', value: 'mp4', label: 'MP4', text: 'Universell, Web, TV und mobile Geräte' },
     { family: 'video', value: 'webm', label: 'WebM', text: 'Modern, klein und browserfreundlich' },
     { family: 'video', value: 'mkv', label: 'MKV', text: 'Flexible Datei für Archiv und NAS' },
+    { family: 'video', value: 'mov', label: 'MOV', text: 'Gut für Apple-Workflows und Schnitt' },
+    { family: 'video', value: 'm4v', label: 'M4V', text: 'MP4-Variante für Apple-Geräte' },
+    { family: 'video', value: 'avi', label: 'AVI', text: 'Älterer Container für Legacy-Software' },
+    { family: 'video', value: 'mpg', label: 'MPG', text: 'MPEG-2 für ältere Player und DVD-Tools' },
+    { family: 'video', value: 'mpeg', label: 'MPEG', text: 'Kompatibler MPEG-2-Container' },
   ],
   audio: [
     { family: 'audio', value: 'mp3', label: 'MP3', text: 'Maximale Kompatibilität' },
     { family: 'audio', value: 'm4a', label: 'M4A', text: 'Gute Qualität bei kleiner Datei' },
+    { family: 'audio', value: 'aac', label: 'AAC', text: 'Effizient für Web, Handy und Streaming' },
+    { family: 'audio', value: 'ogg', label: 'OGG', text: 'Offen und gut für Web-Audio' },
     { family: 'audio', value: 'opus', label: 'Opus', text: 'Sehr effizient für Sprache und Musik' },
     { family: 'audio', value: 'wav', label: 'WAV', text: 'Unkomprimiert für Schnittprogramme' },
     { family: 'audio', value: 'flac', label: 'FLAC', text: 'Verlustfrei komprimiert' },
+    { family: 'audio', value: 'aiff', label: 'AIFF', text: 'Unkomprimiert für Audio-Workstations' },
   ],
   image: [
     { family: 'image', value: 'webp', label: 'WebP', text: 'Klein, modern und webfreundlich' },
     { family: 'image', value: 'jpg', label: 'JPG', text: 'Fotos und breite Kompatibilität' },
+    { family: 'image', value: 'jpeg', label: 'JPEG', text: 'Alias für JPG in Foto-Workflows' },
     { family: 'image', value: 'png', label: 'PNG', text: 'Grafiken und Transparenz' },
+    { family: 'image', value: 'avif', label: 'AVIF', text: 'Sehr effizient für moderne Browser' },
+    { family: 'image', value: 'gif', label: 'GIF', text: 'Einzelbild oder einfache Web-Grafik' },
+    { family: 'image', value: 'bmp', label: 'BMP', text: 'Unkomprimiert für ältere Anwendungen' },
+    { family: 'image', value: 'tiff', label: 'TIFF', text: 'Druck, Scan und Archiv' },
   ],
 }
 
@@ -144,14 +180,62 @@ function formatDuration(seconds?: number | null) {
   return `${mins}:${String(secs).padStart(2, '0')}`
 }
 
+function formatEta(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return 'Berechne Restzeit'
+  if (seconds < 1) return 'weniger als 1 Sek. verbleibend'
+  const rounded = Math.ceil(seconds)
+  const mins = Math.floor(rounded / 60)
+  const secs = rounded % 60
+  if (mins <= 0) return `${secs} Sek. verbleibend`
+  const hours = Math.floor(mins / 60)
+  const restMins = mins % 60
+  if (hours > 0) return `${hours} Std. ${restMins} Min. verbleibend`
+  return `${mins} Min. ${String(secs).padStart(2, '0')} Sek. verbleibend`
+}
+
+function estimateEta(loaded: number, total: number | undefined, startedAt: number) {
+  if (!total || loaded <= 0) return null
+  const elapsedSeconds = (Date.now() - startedAt) / 1000
+  if (elapsedSeconds <= 0) return null
+  const bytesPerSecond = loaded / elapsedSeconds
+  if (bytesPerSecond <= 0) return null
+  return Math.max(0, (total - loaded) / bytesPerSecond)
+}
+
+function ProgressMeter({
+  progress,
+  label,
+  eta,
+  indeterminate,
+}: {
+  progress?: number | null
+  label: string
+  eta?: string | null
+  indeterminate?: boolean
+}) {
+  const safeProgress = Math.max(0, Math.min(100, Math.round(progress ?? 0)))
+  return (
+    <div className={`progress-meter ${indeterminate ? 'indeterminate' : ''}`} aria-label={indeterminate ? label : `${label}: ${safeProgress}%`}>
+      <div className="progress-meta">
+        <span>{label}</span>
+        <strong>{indeterminate ? 'läuft' : `${safeProgress}%`}</strong>
+      </div>
+      <div className="progress-track">
+        <span style={{ width: `${safeProgress}%` }} />
+      </div>
+      {eta ? <small>{eta}</small> : null}
+    </div>
+  )
+}
+
 function inferFamily(file: File | null): MediaFamily {
   if (!file) return 'video'
   if (file.type.startsWith('audio/')) return 'audio'
   if (file.type.startsWith('image/')) return 'image'
   if (file.type.startsWith('video/')) return 'video'
   const ext = file.name.split('.').pop()?.toLowerCase()
-  if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus'].includes(ext)) return 'audio'
-  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff'].includes(ext)) return 'image'
+  if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'aiff', 'aif'].includes(ext)) return 'audio'
+  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif'].includes(ext)) return 'image'
   return 'video'
 }
 
@@ -166,11 +250,34 @@ function allowedConvertFamilies(sourceFamily: MediaFamily): MediaFamily[] {
   return ['image']
 }
 
-function findFormat(family: MediaFamily, value: string): FormatDef {
-  return formatCatalog[family].find((format) => format.value === value) || formatCatalog[family][0]
+function findFormat(catalog: Record<MediaFamily, FormatDef[]>, family: MediaFamily, value: string): FormatDef {
+  return catalog[family].find((format) => format.value === value) || catalog[family][0] || formatCatalog[family][0]
+}
+
+function buildCatalogFromOptions(options: OptionsResponse | null, scope: 'download' | 'convert') {
+  const serverFormats = options?.[scope]?.formats
+  if (!serverFormats) return formatCatalog
+  const next = { ...formatCatalog } as Record<MediaFamily, FormatDef[]>
+  ;(['video', 'audio', 'image'] as MediaFamily[]).forEach((family) => {
+    const allowed = serverFormats[family]
+    if (!allowed?.length) return
+    next[family] = allowed.map((value) => {
+      const normalized = value.toLowerCase()
+      return (
+        formatCatalog[family].find((format) => format.value === normalized) || {
+          family,
+          value: normalized,
+          label: normalized.toUpperCase(),
+          text: 'Vom Server unterstütztes Format',
+        }
+      )
+    })
+  })
+  return next
 }
 
 function FormatPicker({
+  catalog,
   families,
   selectedFamily,
   selectedFormat,
@@ -178,6 +285,7 @@ function FormatPicker({
   onOpenChange,
   onSelect,
 }: {
+  catalog: Record<MediaFamily, FormatDef[]>
   families: MediaFamily[]
   selectedFamily: MediaFamily
   selectedFormat: string
@@ -187,8 +295,8 @@ function FormatPicker({
 }) {
   const [query, setQuery] = useState('')
   const [activeFamily, setActiveFamily] = useState<MediaFamily>(selectedFamily)
-  const selected = findFormat(selectedFamily, selectedFormat)
-  const formats = formatCatalog[activeFamily].filter((format) => {
+  const selected = findFormat(catalog, selectedFamily, selectedFormat)
+  const formats = catalog[activeFamily].filter((format) => {
     const haystack = `${format.label} ${format.text}`.toLowerCase()
     return haystack.includes(query.toLowerCase())
   })
@@ -316,6 +424,8 @@ function AdvancedOptions({
               <option value="libx264">H.264</option>
               <option value="libx265">H.265 / HEVC</option>
               <option value="libvpx-vp9">VP9</option>
+              <option value="mpeg4">MPEG-4 Part 2</option>
+              <option value="mpeg2video">MPEG-2</option>
             </select>
           </label>
           <label className="field">
@@ -325,6 +435,8 @@ function AdvancedOptions({
               <option value="aac">AAC</option>
               <option value="libopus">Opus</option>
               <option value="libmp3lame">MP3</option>
+              <option value="libvorbis">Vorbis</option>
+              <option value="mp2">MP2</option>
             </select>
           </label>
           <label className="field">
@@ -355,8 +467,10 @@ function AdvancedOptions({
               <option value="libmp3lame">MP3</option>
               <option value="aac">AAC</option>
               <option value="libopus">Opus</option>
+              <option value="libvorbis">Vorbis</option>
               <option value="flac">FLAC</option>
               <option value="pcm_s16le">PCM WAV</option>
+              <option value="pcm_s16be">PCM AIFF</option>
             </select>
           </label>
           <label className="field">
@@ -418,6 +532,7 @@ function AdvancedOptions({
 }
 
 function ConversionCard({
+  catalog,
   sourceTitle,
   sourceMeta,
   sourceFormat,
@@ -428,6 +543,7 @@ function ConversionCard({
   onPickerOpen,
   onSelect,
 }: {
+  catalog: Record<MediaFamily, FormatDef[]>
   sourceTitle: string
   sourceMeta: string
   sourceFormat: string
@@ -452,6 +568,7 @@ function ConversionCard({
         <span className="format-chip">{sourceFormat}</span>
         <span className="arrow">-&gt;</span>
         <FormatPicker
+          catalog={catalog}
           families={families}
           selectedFamily={selectedFamily}
           selectedFormat={selectedFormat}
@@ -475,6 +592,8 @@ function JobDetail({
 }) {
   const [log, setLog] = useState<string>('')
   const [status, setStatus] = useState<string>('')
+  const [progress, setProgress] = useState<number>(0)
+  const [currentStep, setCurrentStep] = useState<string | null>(null)
   const logRef = useRef<HTMLPreElement | null>(null)
 
   useEffect(() => {
@@ -488,6 +607,8 @@ function JobDetail({
     let terminal = false
     setLog('')
     setStatus(job.status || '')
+    setProgress(job.progress ?? 0)
+    setCurrentStep(job.current_step || null)
 
     const connect = async () => {
       controller = new AbortController()
@@ -523,6 +644,8 @@ function JobDetail({
                 const payload = JSON.parse(dataLine.replace(/^data:\s*/, ''))
                 if (!mounted) break
                 if (payload.chunk !== undefined) setLog((prev) => (prev || '') + payload.chunk)
+                if (payload.progress !== undefined) setProgress(Number(payload.progress) || 0)
+                if (payload.current_step !== undefined) setCurrentStep(payload.current_step || null)
                 if (payload.status !== undefined) {
                   setStatus(payload.status)
                   if (terminalStatuses.includes(payload.status)) {
@@ -580,7 +703,14 @@ function JobDetail({
       </div>
       <div className="detail-meta">
         <span>{job.type === 'convert' ? 'Konvertierung' : 'Download'}</span>
-        <span>{job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet auf Verarbeitung')}</span>
+        <span>{currentStep || job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet auf Verarbeitung')}</span>
+      </div>
+      <div className="detail-progress">
+        <ProgressMeter
+          progress={progress || job.progress || 0}
+          label={(currentStep || job.current_step || status || job.status || 'Status').toString()}
+          eta={null}
+        />
       </div>
       <pre ref={logRef} className="log-panel">{log || 'Noch keine Logs vorhanden.'}</pre>
     </section>
@@ -613,6 +743,9 @@ function App() {
   const [compressionWarning, setCompressionWarning] = useState<string | null>(null)
   const [pendingWarning, setPendingWarning] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
+  const [transfer, setTransfer] = useState<TransferState | null>(null)
+  const [downloadCatalog, setDownloadCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
+  const [convertCatalog, setConvertCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) || null, [jobs, selectedId])
@@ -625,7 +758,7 @@ function App() {
   const activeQuality = activeTab === 'download' ? downloadQualityPreset : convertQualityPreset
   const activeWarningFamily = activeTab === 'download' ? downloadFamily : convertFamily
 
-  const loadJobs = async () => {
+  const loadJobs = useCallback(async () => {
     try {
       const r = await fetch('/api/jobs')
       if (!r.ok) {
@@ -637,27 +770,61 @@ function App() {
     } catch (e) {
       setJobs([])
     }
-  }
+  }, [])
 
   useEffect(() => {
     loadJobs()
+  }, [loadJobs])
+
+  useEffect(() => {
+    fetch('/api/options')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: OptionsResponse | null) => {
+        setDownloadCatalog(buildCatalogFromOptions(data, 'download'))
+        setConvertCatalog(buildCatalogFromOptions(data, 'convert'))
+      })
+      .catch(() => {
+        setDownloadCatalog(formatCatalog)
+        setConvertCatalog(formatCatalog)
+      })
   }, [])
 
   useEffect(() => {
     const interval = window.setInterval(loadJobs, 5000)
     return () => window.clearInterval(interval)
-  }, [])
+  }, [loadJobs])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
   useEffect(() => {
-    const allowed = formatCatalog[downloadFamily].map((format) => format.value)
-    if (!allowed.includes(downloadFormat)) {
-      setDownloadFormat(formatCatalog[downloadFamily][0].value)
+    if (!transfer?.jobId || transfer.phase === 'download') return
+    const job = jobs.find((item) => item.id === transfer.jobId)
+    if (!job) return
+    if (terminalStatuses.includes((job.status || '').toLowerCase())) {
+      setTransfer(null)
+      return
     }
-  }, [downloadFamily, downloadFormat])
+    setTransfer((current) => {
+      if (!current || current.jobId !== job.id || current.phase === 'download') return current
+      const nextProgress = job.progress || current.progress
+      const nextLabel = `${job.type === 'convert' ? 'Konvertierung' : 'Download'}: Auftrag #${job.id}`
+      if (current.progress === nextProgress && current.label === nextLabel) return current
+      return {
+        ...current,
+        progress: nextProgress,
+        label: nextLabel,
+      }
+    })
+  }, [jobs, transfer])
+
+  useEffect(() => {
+    const allowed = downloadCatalog[downloadFamily].map((format) => format.value)
+    if (!allowed.includes(downloadFormat)) {
+      setDownloadFormat(downloadCatalog[downloadFamily][0].value)
+    }
+  }, [downloadFamily, downloadFormat, downloadCatalog])
 
   useEffect(() => {
     const nextSource = inferFamily(selectedFile)
@@ -665,21 +832,21 @@ function App() {
     const allowed = allowedConvertFamilies(nextSource)
     const nextFamily = allowed.includes(convertFamily) ? convertFamily : allowed[0]
     setConvertFamily(nextFamily)
-    if (!formatCatalog[nextFamily].some((format) => format.value === convertFormat)) {
-      setConvertFormat(formatCatalog[nextFamily][0].value)
+    if (!convertCatalog[nextFamily].some((format) => format.value === convertFormat)) {
+      setConvertFormat(convertCatalog[nextFamily][0].value)
     }
-  }, [selectedFile])
+  }, [selectedFile, convertCatalog])
 
   useEffect(() => {
     if (!convertFamilies.includes(convertFamily)) {
       setConvertFamily(convertFamilies[0])
-      setConvertFormat(formatCatalog[convertFamilies[0]][0].value)
+      setConvertFormat(convertCatalog[convertFamilies[0]][0].value)
       return
     }
-    if (!formatCatalog[convertFamily].some((format) => format.value === convertFormat)) {
-      setConvertFormat(formatCatalog[convertFamily][0].value)
+    if (!convertCatalog[convertFamily].some((format) => format.value === convertFormat)) {
+      setConvertFormat(convertCatalog[convertFamily][0].value)
     }
-  }, [convertFamily, convertFormat, convertFamilies])
+  }, [convertFamily, convertFormat, convertFamilies, convertCatalog])
 
   useEffect(() => {
     const warningProfile = activeQuality === 'small' ? 'small' : 'balanced'
@@ -761,15 +928,27 @@ function App() {
         setPendingWarning(null)
         setMessage(`Download gestartet: Auftrag #${created.id}`)
         setSelectedId(created.id)
+        setTransfer({
+          phase: 'convert',
+          jobId: created.id,
+          loaded: 0,
+          startedAt: Date.now(),
+          progress: created.progress || 0,
+          etaSeconds: null,
+          label: `Download: Auftrag #${created.id}`,
+        })
         loadJobs()
       } else if (r.status === 409) {
         const data = await r.json().catch(() => null)
+        setTransfer(null)
         setPendingAction('download')
-      setPendingWarning(data?.detail?.warning || data?.warning || compressionWarning || 'Qualitätswarnung')
+        setPendingWarning(data?.detail?.warning || data?.warning || compressionWarning || 'Qualitätswarnung')
       } else {
+        setTransfer(null)
         setMessage('Download konnte nicht gestartet werden.')
       }
     } catch (e) {
+      setTransfer(null)
       setMessage('Download konnte nicht gestartet werden.')
     }
   }
@@ -796,40 +975,135 @@ function App() {
       const params = new URLSearchParams()
       if (force) params.set('force', 'true')
       const suffix = params.toString() ? `?${params.toString()}` : ''
-      const r = await fetch(`/api/jobs/convert-upload${suffix}`, {
-        method: 'POST',
-        body: data,
+      const startedAt = Date.now()
+      setTransfer({
+        phase: 'upload',
+        loaded: 0,
+        total: selectedFile.size,
+        startedAt,
+        progress: 0,
+        etaSeconds: null,
+        label: `Upload: ${selectedFile.name}`,
       })
-      if (r.ok) {
-        const created = await r.json()
+      const xhrResult = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `/api/jobs/convert-upload${suffix}`)
+        xhr.upload.onprogress = (event) => {
+          const total = event.lengthComputable ? event.total : selectedFile.size
+          const loaded = event.loaded
+          const complete = total > 0 && loaded >= total
+          setTransfer({
+            phase: 'upload',
+            loaded,
+            total,
+            startedAt,
+            progress: total ? Math.round((loaded / total) * 100) : 0,
+            etaSeconds: complete ? 0 : estimateEta(loaded, total, startedAt),
+            label: complete ? 'Upload wird verarbeitet' : `Upload: ${selectedFile.name}`,
+          })
+        }
+        xhr.onload = () => {
+          setTransfer((current) => current?.phase === 'upload' ? {
+            ...current,
+            progress: 100,
+            etaSeconds: 0,
+            label: 'Upload wird verarbeitet',
+          } : current)
+          let body: any = null
+          try {
+            body = xhr.responseText ? JSON.parse(xhr.responseText) : null
+          } catch (e) {
+            body = null
+          }
+          resolve({ status: xhr.status, body })
+        }
+        xhr.onerror = () => reject(new Error('upload_failed'))
+        xhr.send(data)
+      })
+      if (xhrResult.status >= 200 && xhrResult.status < 300) {
+        const created = xhrResult.body
         setSelectedFile(null)
         if (fileInputRef.current) fileInputRef.current.value = ''
         setPendingWarning(null)
         setMessage(`Konvertierung gestartet: Auftrag #${created.id}`)
         setSelectedId(created.id)
+        setTransfer({
+          phase: 'convert',
+          jobId: created.id,
+          loaded: 0,
+          startedAt: Date.now(),
+          progress: created.progress || 0,
+          etaSeconds: null,
+          label: `Konvertierung: Auftrag #${created.id}`,
+        })
         loadJobs()
-      } else if (r.status === 409) {
-        const warning = await r.json().catch(() => null)
+      } else if (xhrResult.status === 409) {
+        const warning = xhrResult.body
+        setTransfer(null)
         setPendingAction('convert')
         setPendingWarning(warning?.detail?.warning || warning?.warning || compressionWarning || 'Qualitätswarnung')
-      } else if (r.status === 413) {
+      } else if (xhrResult.status === 413) {
+        setTransfer(null)
         setMessage('Die Datei ist größer als das erlaubte Upload-Limit.')
       } else {
+        setTransfer(null)
         setMessage('Konvertierung konnte nicht gestartet werden.')
       }
     } catch (e) {
+      setTransfer(null)
       setMessage('Konvertierung konnte nicht gestartet werden.')
     }
   }
 
   const downloadJob = async (job: Job) => {
     try {
+      const startedAt = Date.now()
+      setTransfer({
+        phase: 'download',
+        jobId: job.id,
+        loaded: 0,
+        startedAt,
+        progress: 0,
+        etaSeconds: null,
+        indeterminate: true,
+        label: `Download: Auftrag #${job.id}`,
+      })
       const r = await fetch(`/api/jobs/${job.id}/download`)
       if (!r.ok) {
+        setTransfer(null)
         setMessage('Datei ist noch nicht herunterladbar.')
         return
       }
-      const blob = await r.blob()
+      const totalHeader = r.headers.get('Content-Length')
+      const total = totalHeader ? Number(totalHeader) : undefined
+      let blob: Blob
+      if (r.body) {
+        const reader = r.body.getReader()
+        const chunks: BlobPart[] = []
+        let loaded = 0
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            chunks.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer)
+            loaded += value.length
+            setTransfer({
+              phase: 'download',
+              jobId: job.id,
+              loaded,
+              total,
+              startedAt,
+              progress: total ? Math.round((loaded / total) * 100) : 0,
+              etaSeconds: estimateEta(loaded, total, startedAt),
+              indeterminate: !total,
+              label: `Download: Auftrag #${job.id}`,
+            })
+          }
+        }
+        blob = new Blob(chunks, { type: r.headers.get('Content-Type') || 'application/octet-stream' })
+      } else {
+        blob = await r.blob()
+      }
       const objectUrl = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = objectUrl
@@ -838,7 +1112,20 @@ function App() {
       link.click()
       link.remove()
       URL.revokeObjectURL(objectUrl)
+      setTransfer({
+        phase: 'download',
+        jobId: job.id,
+        loaded: total || blob.size,
+        total: total || blob.size,
+        startedAt,
+        progress: 100,
+        etaSeconds: 0,
+        indeterminate: false,
+        label: `Download: Auftrag #${job.id}`,
+      })
+      window.setTimeout(() => setTransfer((current) => (current?.phase === 'download' && current.jobId === job.id ? null : current)), 1800)
     } catch (e) {
+      setTransfer(null)
       setMessage('Download der fertigen Datei fehlgeschlagen.')
     }
   }
@@ -913,6 +1200,7 @@ function App() {
                   </div>
                 ) : null}
                 <ConversionCard
+                  catalog={downloadCatalog}
                   sourceTitle={downloadInfo?.title || 'Online-Medium'}
                   sourceMeta={url || 'URL einfügen und optional analysieren'}
                   sourceFormat="WEB"
@@ -964,6 +1252,7 @@ function App() {
                   </label>
                 </div>
                 <ConversionCard
+                  catalog={convertCatalog}
                   sourceTitle={selectedFile?.name || 'Keine Datei ausgewählt'}
                   sourceMeta={selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]}` : 'Datei hochladen, dann Ziel-Format wählen'}
                   sourceFormat={selectedFile ? fileExt(selectedFile.name) : 'FILE'}
@@ -1005,6 +1294,16 @@ function App() {
                 {activeTab === 'download' ? 'Download starten' : 'Konvertierung starten'}
               </button>
             </div>
+            {transfer ? (
+              <div className="transfer-progress">
+                <ProgressMeter
+                  progress={transfer.progress}
+                  label={transfer.label}
+                  eta={transfer.phase === 'convert' ? 'Restzeit wird im Auftrag berechnet' : formatEta(transfer.etaSeconds)}
+                  indeterminate={transfer.indeterminate}
+                />
+              </div>
+            ) : null}
             {message ? <div className="message">{message}</div> : null}
           </section>
 
@@ -1029,6 +1328,14 @@ function App() {
                     <span className="item-main">
                       <strong>#{job.id} {job.type === 'convert' ? 'Konvertierung' : 'Download'}</strong>
                       <small>{job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet')}</small>
+                      {['queued', 'running'].includes((job.status || '').toLowerCase()) ? (
+                        <span className="list-progress" aria-label={`Fortschritt ${job.progress || 0}%`}>
+                          <i
+                            className={(job.progress || 0) <= 0 ? 'indeterminate' : ''}
+                            style={{ width: `${Math.max(0, Math.min(100, job.progress || 0))}%` }}
+                          />
+                        </span>
+                      ) : null}
                     </span>
                     <StatusBadge status={job.status} />
                   </button>

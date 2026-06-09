@@ -27,13 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 DOWNLOAD_FORMATS = {
-    "audio": {"mp3", "m4a", "opus", "wav", "flac"},
-    "video": {"mp4", "webm", "mkv"},
+    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac", "aiff"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg"},
 }
 CONVERT_FORMATS = {
-    "audio": {"mp3", "m4a", "opus", "wav", "flac"},
-    "video": {"mp4", "webm", "mkv"},
-    "image": {"webp", "jpg", "png"},
+    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac", "aiff"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg"},
+    "image": {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff"},
 }
 QUALITY_PRESETS = {"high", "balanced", "small"}
 DOWNLOAD_QUALITIES = {"best", "1080p", "720p", "480p", "360p"}
@@ -576,8 +576,12 @@ def job_events(
                 with next(get_session()) as session:
                     job = crud.get_job(session, job_id)
                     status = job.status if job else "notfound"
+                    progress = job.progress if job else 0
+                    current_step = job.current_step if job else None
             except Exception:
                 status = "error"
+                progress = 0
+                current_step = None
 
             # read appended data from log file
             new_chunk = ""
@@ -592,7 +596,12 @@ def job_events(
             except Exception:
                 new_chunk = ""
 
-            payload = {"status": status, "chunk": new_chunk}
+            payload = {
+                "status": status,
+                "chunk": new_chunk,
+                "progress": progress,
+                "current_step": current_step,
+            }
 
             # include offset as event id so clients can resume using Last-Event-ID
             yield f"id: {offset}\n"

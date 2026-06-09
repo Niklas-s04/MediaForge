@@ -146,3 +146,139 @@ test('clears selected local file after successful upload conversion', async ({ p
   await expect(page.locator('text=Datei auswählen oder hier ablegen')).toBeVisible();
 });
 
+test('keeps streamed job logs stable across job polling refreshes', async ({ page }) => {
+  let jobPolls = 0;
+
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: { formats: { video: ['mp4'], audio: ['mp3'], image: ['webp'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs/321/events', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: 'id: 84\ndata: {"status":"success","progress":100,"current_step":"Fertig","chunk":"[test] Conversion finished\\n"}\n\n',
+    });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    jobPolls += 1;
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { id: 321, type: 'convert', status: 'success', progress: 100, current_step: 'Fertig', output_path: '/data/output/job-321.mp3' },
+      ]),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("#321 Konvertierung")');
+
+  await expect(page.locator('.log-panel')).toContainText('Conversion finished');
+  await page.locator('button:has-text("Aktualisieren")').click();
+  await expect(page.locator('.log-panel')).toContainText('Conversion finished');
+  await expect(page.locator('.log-panel')).not.toContainText('Noch keine Logs vorhanden.');
+  expect(jobPolls).toBeGreaterThanOrEqual(2);
+});
+
+test('shows upload processing state before conversion job is created', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: { formats: { audio: ['mp3'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs/convert-upload*', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ id: 654, type: 'convert', status: 'queued', progress: 0 }),
+    });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+  await page.setInputFiles('#file-upload', {
+    name: 'large.wav',
+    mimeType: 'audio/wav',
+    buffer: Buffer.alloc(5 * 1024 * 1024, 1),
+  });
+
+  await page.click('button:has-text("Konvertierung starten")');
+  await expect(page.locator('.transfer-progress')).toContainText(/Upload|verarbeitet/);
+  await expect(page.locator('text=Konvertierung gestartet: Auftrag #654')).toBeVisible();
+});
+
+test('downloads finished output with unknown response length', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: { formats: { audio: ['mp3'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs/789/download', (route) => {
+    route.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="result.mp3"',
+      },
+      body: Buffer.from('media-output'),
+    });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { id: 789, type: 'convert', status: 'success', progress: 100, current_step: 'Fertig', output_path: '/data/output/result.mp3' },
+      ]),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.locator('.download-row button:has-text("Download")').click();
+
+  await expect(page.locator('.transfer-progress')).toContainText('Download: Auftrag #789');
+  await expect(page.locator('.transfer-progress')).toContainText('100%');
+});
+

@@ -94,6 +94,29 @@ def test_create_download_job_rejects_invalid_format():
     assert "Unsupported video download format" in exc.value.detail
 
 
+def test_normalizers_accept_extended_output_formats():
+    download = api_main.normalize_download_input(
+        {
+            "url": "https://example.invalid/video",
+            "output_kind": "video",
+            "output_format": "mov",
+            "quality_preset": "balanced",
+        }
+    )
+    assert download["output_format"] == "mov"
+
+    image = api_main.normalize_convert_options(
+        file=fake_upload("photo.tif", b"image", content_type="image/tiff"),
+        compression_family="image",
+        compression_profile="balanced",
+        output_format="avif",
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    assert image["source_family"] == "image"
+    assert image["output_format"] == "avif"
+
+
 def test_store_upload_file_removes_partial_file_when_too_large(tmp_path):
     upload_dir = tmp_path / "uploads"
     upload = fake_upload("too-big.wav", b"abcdef")

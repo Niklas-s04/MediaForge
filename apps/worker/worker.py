@@ -10,6 +10,7 @@ import yt_dlp
 import subprocess
 import glob
 import json
+import re
 from apps.api.app.compression_goals import resolve_compression_family, get_compression_profile
 from apps.api.app.models import Flow, FlowRun, Job
 
@@ -27,16 +28,26 @@ FORMAT_CODECS = {
     "audio": {
         "mp3": {"codec": "libmp3lame", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
         "m4a": {"codec": "aac", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
+        "aac": {"codec": "aac", "bitrate": {"high": "256k", "balanced": "160k", "small": "96k"}},
+        "ogg": {"codec": "libvorbis", "bitrate": {"high": "224k", "balanced": "160k", "small": "96k"}},
         "opus": {"codec": "libopus", "bitrate": {"high": "192k", "balanced": "128k", "small": "80k"}},
         "wav": {"codec": "pcm_s16le"},
         "flac": {"codec": "flac"},
+        "aiff": {"codec": "pcm_s16be"},
     },
     "video": {
         "mp4": {"video_codec": "libx264", "audio_codec": "aac"},
         "webm": {"video_codec": "libvpx-vp9", "audio_codec": "libopus"},
         "mkv": {"video_codec": "libx264", "audio_codec": "aac"},
+        "mov": {"video_codec": "libx264", "audio_codec": "aac"},
+        "m4v": {"video_codec": "libx264", "audio_codec": "aac"},
+        "avi": {"video_codec": "mpeg4", "audio_codec": "libmp3lame"},
+        "mpg": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
+        "mpeg": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
     },
 }
+_PROGRESS_WRITE_STATE: dict[int, dict[str, float | int]] = {}
+_FFMPEG_ENCODERS: set[str] | None | bool = None
 VIDEO_QUALITY = {
     "high": {"crf": 20, "max_width": None, "max_fps": None},
     "balanced": {"crf": 24, "max_width": 1920, "max_fps": 30},
@@ -147,6 +158,213 @@ def _int_option(value, default=None, minimum=None, maximum=None):
     return parsed
 
 
+def _format_eta(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return "Restzeit wird berechnet"
+    rounded = int(seconds + 0.999)
+    if rounded < 60:
+        return f"{rounded}s"
+    minutes, secs = divmod(rounded, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def _format_size(bytes_value: int | float | None) -> str:
+    if not bytes_value:
+        return "0 KB"
+    value = float(bytes_value)
+    if value < 1024 * 1024:
+        return f"{max(1, round(value / 1024))} KB"
+    return f"{value / 1024 / 1024:.1f} MB"
+
+
+def _format_speed(bytes_per_second: int | float | None) -> str | None:
+    if not bytes_per_second or bytes_per_second <= 0:
+        return None
+    return f"{_format_size(bytes_per_second)}/s"
+
+
+def _set_job_progress(session: Session, job: Job, progress: int, step: str | None = None, *, force: bool = False) -> bool:
+    progress = max(0, min(100, int(progress)))
+    key = int(job.id or id(job))
+    now = time.monotonic()
+    last = _PROGRESS_WRITE_STATE.get(key)
+    if not force and last and progress <= int(last["progress"]) and now - float(last["ts"]) < 1:
+        return False
+    job.progress = progress
+    if step is not None:
+        job.current_step = step
+    session.add(job)
+    session.commit()
+    _PROGRESS_WRITE_STATE[key] = {"progress": progress, "ts": now}
+    return True
+
+
+def _parse_ffmpeg_progress_seconds(line: str, current: float = 0.0) -> float:
+    line = (line or "").strip()
+    if line.startswith("out_time_ms="):
+        try:
+            return max(0.0, int(line.split("=", 1)[1]) / 1_000_000)
+        except Exception:
+            return current
+    if line.startswith("out_time="):
+        match = re.match(r"out_time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
+        if match:
+            return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+    return current
+
+
+def _download_progress_from_hook(data: dict, attempt: int, retries: int) -> tuple[int, str]:
+    status = data.get("status")
+    if status == "finished":
+        return 38, "Download abgeschlossen - Datei wird vorbereitet"
+
+    downloaded = data.get("downloaded_bytes") or 0
+    total = data.get("total_bytes") or data.get("total_bytes_estimate")
+    speed = _format_speed(data.get("speed"))
+    eta = data.get("eta")
+    attempt_text = f"Versuch {attempt}/{retries}"
+    if total:
+        ratio = max(0.0, min(1.0, float(downloaded) / float(total)))
+        progress = 8 + round(30 * ratio)
+        details = f"{_format_size(downloaded)} von {_format_size(total)}"
+        if speed:
+            details += f" - {speed}"
+        if eta is not None:
+            details += f" - ca. {_format_eta(float(eta))} verbleibend"
+        return progress, f"Download laeuft - {attempt_text} - {details}"
+
+    progress = 8 + min(8, max(0, attempt - 1) * 2)
+    details = "Groesse unbekannt"
+    if downloaded:
+        details += f" - {_format_size(downloaded)} geladen"
+    if speed:
+        details += f" - {speed}"
+    return progress, f"Download laeuft - {attempt_text} - {details}"
+
+
+def _probe_duration(input_path: str) -> float | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                input_path,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            text=True,
+        )
+        duration = float((result.stdout or "").strip())
+        return duration if duration > 0 else None
+    except Exception:
+        return None
+
+
+def _available_ffmpeg_encoders() -> set[str] | None:
+    global _FFMPEG_ENCODERS
+    if isinstance(_FFMPEG_ENCODERS, set):
+        return _FFMPEG_ENCODERS
+    if _FFMPEG_ENCODERS is False:
+        return None
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            text=True,
+        )
+        encoders: set[str] = set()
+        for line in (result.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and re.match(r"^[VAS.][F.][S.][X.][B.][D.]$", parts[0]):
+                encoders.add(parts[1])
+        _FFMPEG_ENCODERS = encoders
+        return encoders
+    except Exception:
+        _FFMPEG_ENCODERS = False
+        return None
+
+
+def _validate_media_command_encoders(cmd: list[str]):
+    encoders = _available_ffmpeg_encoders()
+    if not encoders:
+        return
+    checked_options = {"-c:v", "-c:a", "-acodec", "-vcodec"}
+    missing = []
+    for idx, item in enumerate(cmd[:-1]):
+        if item in checked_options:
+            encoder = cmd[idx + 1]
+            if encoder != "copy" and encoder not in encoders:
+                missing.append(encoder)
+    if missing:
+        unique = ", ".join(sorted(set(missing)))
+        raise RuntimeError(f"FFmpeg encoder nicht verfuegbar: {unique}")
+
+
+def _run_ffmpeg_with_progress(
+    cmd: list[str],
+    *,
+    session: Session,
+    job: Job,
+    input_path: str,
+    start_progress: int,
+    end_progress: int,
+    step: str,
+):
+    duration = _probe_duration(input_path)
+    _validate_media_command_encoders(cmd)
+    _set_job_progress(session, job, start_progress, f"{step} - Restzeit wird berechnet", force=True)
+    if not duration:
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _set_job_progress(session, job, end_progress, step, force=True)
+        return
+
+    progress_cmd = cmd[:-1] + ["-progress", "pipe:1", "-nostats", cmd[-1]]
+    started = time.time()
+    process = subprocess.Popen(
+        progress_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    last_update = 0.0
+    out_time = 0.0
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        out_time = _parse_ffmpeg_progress_seconds(line, out_time)
+
+        now = time.time()
+        if now - last_update < 0.5 and "progress=end" not in line:
+            continue
+        last_update = now
+        ratio = max(0.0, min(1.0, out_time / duration))
+        progress = start_progress + round((end_progress - start_progress) * ratio)
+        elapsed = max(0.001, now - started)
+        eta = (elapsed / ratio) - elapsed if ratio > 0 else None
+        _set_job_progress(session, job, progress, f"{step} - {progress}% - ca. {_format_eta(eta)} verbleibend")
+
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, progress_cmd)
+    _set_job_progress(session, job, end_progress, step, force=True)
+
+
 def _choice_option(value, allowed: set[str], default: str):
     cleaned = str(value or "").lower()
     return cleaned if cleaned in allowed else default
@@ -161,6 +379,43 @@ def _download_format_selector(kind: str, download_quality: str | None) -> str:
         return "bestvideo+bestaudio/best"
     max_height = quality.removesuffix("p")
     return f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
+
+
+def _download_with_ytdlp(
+    *,
+    session: Session,
+    job: Job,
+    job_id: int,
+    input_url: str,
+    fmt: str,
+    outtmpl: str,
+    attempt: int,
+    retries: int,
+    download_timeout: int | float,
+):
+    def progress_hook(data: dict):
+        progress, step = _download_progress_from_hook(data, attempt, retries)
+        _set_job_progress(session, job, progress, step)
+
+    options = {
+        "format": fmt,
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": retries,
+        "socket_timeout": download_timeout,
+        "progress_hooks": [progress_hook],
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        ydl.download([input_url])
+    files = glob.glob(os.path.join(os.path.dirname(outtmpl), "*"))
+    if not files:
+        return None
+    files.sort(key=lambda p: os.path.getsize(p), reverse=True)
+    filename = files[0]
+    _log(job_id, f"Downloaded to {filename}")
+    return filename
 
 
 def _image_filter(quality: str) -> list[str]:
@@ -190,7 +445,7 @@ def _build_media_command(
         format_config = FORMAT_CODECS["audio"].get(output_format) or FORMAT_CODECS["audio"]["mp3"]
         codec = _choice_option(
             options.get("audio_codec"),
-            {"libmp3lame", "aac", "libopus", "pcm_s16le", "flac"},
+            {"libmp3lame", "aac", "libopus", "libvorbis", "pcm_s16le", "pcm_s16be", "flac"},
             str(format_config["codec"]),
         )
         cmd += ["-vn", "-acodec", codec]
@@ -208,12 +463,12 @@ def _build_media_command(
         settings = VIDEO_QUALITY[quality]
         video_codec = _choice_option(
             options.get("video_codec"),
-            {"libx264", "libx265", "libvpx-vp9"},
+            {"libx264", "libx265", "libvpx-vp9", "mpeg4", "mpeg2video"},
             str(format_config["video_codec"]),
         )
         audio_codec = _choice_option(
             options.get("audio_codec"),
-            {"aac", "libopus", "libmp3lame"},
+            {"aac", "libopus", "libmp3lame", "libvorbis", "mp2"},
             str(format_config["audio_codec"]),
         )
         crf = _int_option(options.get("crf"), settings["crf"], minimum=0, maximum=51)
@@ -227,6 +482,8 @@ def _build_media_command(
         ]
         if output_format == "webm":
             cmd += ["-b:v", "0"]
+        elif output_format in {"mpg", "mpeg"}:
+            cmd += ["-q:v", "4"]
         else:
             cmd += ["-preset", "medium"]
             if output_format == "mp4":
@@ -257,11 +514,13 @@ def _build_media_command(
         image_quality = _int_option(options.get("image_quality"), settings["quality"], minimum=1, maximum=100)
         if output_format == "webp":
             cmd += ["-quality", str(image_quality)]
-        elif output_format == "jpg":
+        elif output_format in {"jpg", "jpeg"}:
             jpeg_q = max(2, min(31, round((100 - image_quality) / 3.3) + 2))
             cmd += ["-q:v", str(jpeg_q)]
         elif output_format == "png":
             cmd += ["-compression_level", str(settings["png_level"])]
+        elif output_format == "avif":
+            cmd += ["-c:v", "libaom-av1", "-still-picture", "1", "-crf", str(max(18, min(45, 62 - round(image_quality / 2))))]
     else:
         cmd += ["-c", "copy"]
 
@@ -357,9 +616,7 @@ def process_download_and_convert(self, job_id: int):
             # mark started
             job.status = 'running'
             job.started_at = datetime.datetime.utcnow()
-            job.progress = 5
-            session.add(job)
-            session.commit()
+            _set_job_progress(session, job, 5, "Download wird vorbereitet", force=True)
 
             input_url = job.input.get('url') if job.input else None
             if not input_url:
@@ -393,27 +650,33 @@ def process_download_and_convert(self, job_id: int):
             backoff = float(preset.get('backoff', 2))
 
             outtmpl = os.path.join(tmpdir, '%(id)s.%(ext)s')
-            download_cmd = ['yt-dlp', '-f', fmt, '-o', outtmpl, input_url]
 
             filename = None
             attempt = 0
             while attempt < retries:
                 attempt += 1
-                _log(job_id, f"Download attempt {attempt}/{retries} cmd={' '.join(download_cmd)} timeout={download_timeout}s")
+                _log(job_id, f"Download attempt {attempt}/{retries} format={fmt} timeout={download_timeout}s")
                 try:
-                    subprocess.run(download_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=download_timeout)
-                    # find the downloaded file in tmpdir
-                    files = glob.glob(os.path.join(tmpdir, '*'))
-                    if files:
-                        # choose the largest file
-                        files.sort(key=lambda p: os.path.getsize(p), reverse=True)
-                        filename = files[0]
+                    _set_job_progress(
+                        session,
+                        job,
+                        min(35, 8 + round((attempt - 1) * 25 / max(1, retries))),
+                        f"Download laeuft - Versuch {attempt}/{retries} - Timeout {download_timeout}s",
+                        force=True,
+                    )
+                    filename = _download_with_ytdlp(
+                        session=session,
+                        job=job,
+                        job_id=job_id,
+                        input_url=input_url,
+                        fmt=fmt,
+                        outtmpl=outtmpl,
+                        attempt=attempt,
+                        retries=retries,
+                        download_timeout=download_timeout,
+                    )
                     if filename:
                         break
-                except subprocess.TimeoutExpired as te:
-                    _log(job_id, f"Download timed out (attempt {attempt}): {te}")
-                except subprocess.CalledProcessError as ce:
-                    _log(job_id, f"yt-dlp failed (attempt {attempt}): {ce}")
                 except Exception as e:
                     _log(job_id, f"Download exception (attempt {attempt}): {e}")
 
@@ -428,10 +691,7 @@ def process_download_and_convert(self, job_id: int):
                 session.commit()
                 return
 
-            _log(job_id, f"Downloaded to {filename}")
-            job.progress = 40
-            session.add(job)
-            session.commit()
+            _set_job_progress(session, job, 40, "Download abgeschlossen", force=True)
 
             outpath = os.path.join(outdir, f"job-{job_id}.{output_format}")
             _log(job_id, f"Converting to {output_format}: {outpath}")
@@ -446,7 +706,15 @@ def process_download_and_convert(self, job_id: int):
                     strip_metadata,
                     input_obj,
                 )
-                subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _run_ffmpeg_with_progress(
+                    cmd,
+                    session=session,
+                    job=job,
+                    input_path=filename,
+                    start_progress=42,
+                    end_progress=95,
+                    step="Konvertierung laeuft",
+                )
             except Exception as e:
                 _log(job_id, f"Conversion failed: {e}")
                 job.status = 'failed'
@@ -458,6 +726,7 @@ def process_download_and_convert(self, job_id: int):
             _log(job_id, f"Conversion finished: {outpath}")
             job.progress = 100
             job.status = 'success'
+            job.current_step = "Fertig"
             job.output_path = outpath
             job.finished_at = datetime.datetime.utcnow()
             session.add(job)
@@ -501,10 +770,7 @@ def process_convert(self, job_id: int):
 
             job.status = "running"
             job.started_at = datetime.datetime.utcnow()
-            job.progress = 5
-            job.current_step = "Datei vorbereiten"
-            session.add(job)
-            session.commit()
+            _set_job_progress(session, job, 5, "Datei vorbereiten", force=True)
 
             input_obj = job.input or {}
             input_path = input_obj.get("file_path") or input_obj.get("input_path")
@@ -556,7 +822,7 @@ def process_convert(self, job_id: int):
             family = requested_family if requested_family in allowed_output_families else source_family
             output_format = _clean_choice(
                 input_obj.get("output_format"),
-                set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else {"webp", "jpg", "png"},
+                set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff"},
                 DEFAULT_FORMATS.get(family, "mp3"),
             )
             strip_metadata = bool(input_obj.get("strip_metadata", True))
@@ -567,13 +833,18 @@ def process_convert(self, job_id: int):
 
             _log(job_id, f"Starting local conversion: {input_path}")
             _log(job_id, f"Output decision: source_family={source_family} family={family} format={output_format} quality={quality}")
-            job.progress = 35
-            job.current_step = "Konvertierung läuft"
-            session.add(job)
-            session.commit()
+            _set_job_progress(session, job, 35, "Konvertierung laeuft", force=True)
 
             try:
-                subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _run_ffmpeg_with_progress(
+                    cmd,
+                    session=session,
+                    job=job,
+                    input_path=input_path,
+                    start_progress=35,
+                    end_progress=95,
+                    step="Konvertierung laeuft",
+                )
             except Exception as e:
                 _log(job_id, f"Conversion failed: {e}")
                 job.status = "failed"
