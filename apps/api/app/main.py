@@ -8,6 +8,7 @@ from .schemas import JobCreate, JobRead, FlowCreate, FlowRead, FlowRunRead
 from .celery_app import celery_app
 from sqlmodel import Session, select
 from datetime import datetime, timedelta
+from sqlalchemy import text
 import os
 import time
 import json
@@ -36,6 +37,11 @@ CONVERT_FORMATS = {
     "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "aiff", "alac", "wma"},
     "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"},
     "image": {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff", "tif"},
+    "document": {"docx", "doc", "odt", "rtf", "txt", "html", "pdf"},
+    "spreadsheet": {"xlsx", "xls", "ods", "csv", "html", "pdf"},
+    "presentation": {"pptx", "ppt", "odp", "html", "pdf"},
+    "pdf": {"pdf", "txt"},
+    "text": {"txt", "html", "pdf", "docx", "odt", "rtf"},
 }
 QUALITY_PRESETS = {"high", "balanced", "small"}
 DOWNLOAD_QUALITIES = {"best", "1080p", "720p", "480p", "360p"}
@@ -102,10 +108,49 @@ def get_output_cleanup_interval_seconds() -> int:
     return max(0, value)
 
 
+def calculate_expiry(finished_at: datetime | None = None) -> datetime:
+    return (finished_at or datetime.utcnow()) + timedelta(hours=get_output_retention_hours())
+
+
+def job_to_read(job: models.Job) -> JobRead:
+    return JobRead(
+        id=job.id,
+        type=job.type,
+        status=job.status,
+        progress=job.progress,
+        current_step=job.current_step,
+        output_path=job.output_path,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+        expires_at=job.expires_at,
+    )
+
+
 def is_path_inside(base_dir: str, target_path: str) -> bool:
     base = os.path.realpath(base_dir)
     target = os.path.realpath(target_path)
     return target == base or target.startswith(base + os.sep)
+
+
+def remove_output_file(output_path: str | None) -> bool:
+    if not output_path:
+        return True
+    output_dir = os.path.realpath(get_output_dir())
+    real_output_path = os.path.realpath(output_path)
+    if not is_path_inside(output_dir, real_output_path):
+        logger.warning("Refusing to remove output outside DATA_OUTPUT_DIR: %s", output_path)
+        return False
+    if not os.path.exists(real_output_path):
+        return True
+    if not os.path.isfile(real_output_path):
+        logger.warning("Refusing to remove non-file output: %s", output_path)
+        return False
+    try:
+        os.remove(real_output_path)
+        return True
+    except Exception:
+        logger.exception("Failed to remove output file %s", output_path)
+        return False
 
 
 def expire_old_job_outputs(session: Session, now: datetime | None = None) -> int:
@@ -113,41 +158,54 @@ def expire_old_job_outputs(session: Session, now: datetime | None = None) -> int
     if retention_hours <= 0:
         return 0
 
-    cutoff = (now or datetime.utcnow()) - timedelta(hours=retention_hours)
-    output_dir = os.path.realpath(get_output_dir())
+    current_time = now or datetime.utcnow()
+    backfill_statement = select(models.Job).where(
+        models.Job.status == "success",
+        models.Job.output_path.is_not(None),
+        models.Job.expires_at.is_(None),
+        models.Job.finished_at.is_not(None),
+    )
+    backfilled = 0
+    for job in session.exec(backfill_statement).all():
+        job.expires_at = calculate_expiry(job.finished_at)
+        session.add(job)
+        backfilled += 1
+    if backfilled:
+        session.commit()
+
     statement = select(models.Job).where(
         models.Job.status == "success",
         models.Job.output_path.is_not(None),
-        models.Job.finished_at.is_not(None),
-        models.Job.finished_at <= cutoff,
+        models.Job.expires_at.is_not(None),
+        models.Job.expires_at <= current_time,
     )
     expired = 0
     for job in session.exec(statement).all():
-        if not job.output_path:
+        if not remove_output_file(job.output_path):
             continue
-        output_path = os.path.realpath(job.output_path)
-        if not is_path_inside(output_dir, output_path):
-            logger.warning("Skipping expired job %s with output outside DATA_OUTPUT_DIR", job.id)
-            continue
-        if os.path.exists(output_path):
-            if not os.path.isfile(output_path):
-                logger.warning("Skipping expired job %s because output is not a file", job.id)
-                continue
-            try:
-                os.remove(output_path)
-            except Exception:
-                logger.exception("Failed to remove expired output for job %s", job.id)
-                continue
 
         job.status = "expired"
         job.output_path = None
+        job.current_step = "Ausgabedatei nach 24h geloescht"
         job.current_step = "Ausgabedatei nach 24h gelöscht"
+        job.current_step = "Ausgabedatei nach 24h geloescht"
         session.add(job)
         expired += 1
 
     if expired:
         session.commit()
     return expired
+
+
+def ensure_job_retention_columns():
+    if not str(engine.url).startswith("sqlite"):
+        return
+    with engine.begin() as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(job)").fetchall()}
+        if "expires_at" not in columns:
+            connection.execute(text("ALTER TABLE job ADD COLUMN expires_at DATETIME"))
+        if "deleted_at" not in columns:
+            connection.execute(text("ALTER TABLE job ADD COLUMN deleted_at DATETIME"))
 
 
 def _run_output_cleanup_once():
@@ -317,6 +375,16 @@ def normalize_convert_options(
         allowed_families = {"audio"}
     elif source_family == "image":
         allowed_families = {"image"}
+    elif source_family == "document":
+        allowed_families = {"document", "pdf", "text"}
+    elif source_family == "spreadsheet":
+        allowed_families = {"spreadsheet", "pdf", "text"}
+    elif source_family == "presentation":
+        allowed_families = {"presentation", "pdf"}
+    elif source_family == "pdf":
+        allowed_families = {"pdf", "text"}
+    elif source_family == "text":
+        allowed_families = {"text", "document", "pdf"}
     else:
         allowed_families = {source_family}
     if output_family not in allowed_families:
@@ -333,7 +401,16 @@ def normalize_convert_options(
     if effective_quality not in QUALITY_PRESETS:
         raise HTTPException(status_code=400, detail=f"Unsupported quality preset '{effective_quality}'")
 
-    default_format = {"audio": "mp3", "video": "mp4", "image": "webp"}[output_family]
+    default_format = {
+        "audio": "mp3",
+        "video": "mp4",
+        "image": "webp",
+        "document": "docx",
+        "spreadsheet": "xlsx",
+        "presentation": "pptx",
+        "pdf": "pdf",
+        "text": "txt",
+    }[output_family]
     effective_format = str(requested_format or default_format).lower().lstrip(".")
     if effective_format not in CONVERT_FORMATS[output_family]:
         raise HTTPException(
@@ -451,6 +528,7 @@ def dispatch_job(job: models.Job):
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+    ensure_job_retention_columns()
     _run_output_cleanup_once()
     start_output_cleanup_thread()
 
@@ -516,6 +594,9 @@ def create_job(
         progress=job.progress,
         current_step=job.current_step,
         output_path=job.output_path,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+        expires_at=job.expires_at,
     )
 
 
@@ -605,6 +686,9 @@ def create_convert_upload_job(
         progress=job.progress,
         current_step=job.current_step,
         output_path=job.output_path,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
+        expires_at=job.expires_at,
     )
 
 
@@ -633,8 +717,8 @@ def download_job_output(
     job = crud.get_job(session, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status == "expired":
-        raise HTTPException(status_code=410, detail="Job output expired")
+    if job.status in {"expired", "deleted"}:
+        raise HTTPException(status_code=410, detail="Job output is no longer available")
     if job.status != "success" or not job.output_path:
         raise HTTPException(status_code=409, detail="Job output is not ready")
 
@@ -650,6 +734,52 @@ def download_job_output(
         media_type="application/octet-stream",
         filename=os.path.basename(output_path),
     )
+
+
+@app.delete("/api/jobs/{job_id}", response_model=JobRead)
+def delete_job_output(
+    job_id: int,
+    session: Session = Depends(get_session),
+):
+    job = crud.get_job(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Running jobs cannot be deleted")
+    if not remove_output_file(job.output_path):
+        raise HTTPException(status_code=403, detail="Output path is outside the download directory")
+
+    job.status = "deleted"
+    job.output_path = None
+    job.current_step = "Auftrag manuell geloescht"
+    job.deleted_at = datetime.utcnow()
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return job_to_read(job)
+
+
+@app.post("/api/jobs/{job_id}/extend", response_model=JobRead)
+def extend_job_output(
+    job_id: int,
+    session: Session = Depends(get_session),
+):
+    job = crud.get_job(session, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in {"expired", "deleted"}:
+        raise HTTPException(status_code=410, detail="Job output is no longer available")
+    if job.status != "success" or not job.output_path:
+        raise HTTPException(status_code=409, detail="Job output is not ready")
+
+    base = job.expires_at or calculate_expiry(job.finished_at)
+    if base < datetime.utcnow():
+        base = datetime.utcnow()
+    job.expires_at = base + timedelta(hours=24)
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return job_to_read(job)
 
 
 @app.get("/api/jobs/{job_id}/events")
@@ -671,10 +801,12 @@ def job_events(
                     status = job.status if job else "notfound"
                     progress = job.progress if job else 0
                     current_step = job.current_step if job else None
+                    expires_at = job.expires_at.isoformat() if job and job.expires_at else None
             except Exception:
                 status = "error"
                 progress = 0
                 current_step = None
+                expires_at = None
 
             # read appended data from log file
             new_chunk = ""
@@ -694,13 +826,14 @@ def job_events(
                 "chunk": new_chunk,
                 "progress": progress,
                 "current_step": current_step,
+                "expires_at": expires_at,
             }
 
             # include offset as event id so clients can resume using Last-Event-ID
             yield f"id: {offset}\n"
             yield f"data: {json.dumps(payload)}\n\n"
 
-            if status in ("success", "failed", "cancelled", "expired", "notfound"):
+            if status in ("success", "failed", "cancelled", "expired", "deleted", "notfound"):
                 break
 
             # heartbeat / poll interval

@@ -35,6 +35,8 @@ services:
       - DATA_LOG_DIR=${DATA_LOG_DIR:-/data/logs}
       - DATA_UPLOAD_DIR=${DATA_UPLOAD_DIR:-/data/uploads}
       - DATA_OUTPUT_DIR=${DATA_OUTPUT_DIR:-/data/output}
+      - OUTPUT_RETENTION_HOURS=${OUTPUT_RETENTION_HOURS:-24}
+      - DOCUMENT_CONVERT_TIMEOUT_SECONDS=${DOCUMENT_CONVERT_TIMEOUT_SECONDS:-120}
     command: ["celery", "-A", "apps.worker.worker:celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-2}"]
     volumes:
       - ../data:/data

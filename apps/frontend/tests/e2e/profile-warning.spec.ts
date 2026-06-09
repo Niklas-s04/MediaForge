@@ -187,6 +187,8 @@ test('keeps streamed job logs stable across job polling refreshes', async ({ pag
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
   await page.click('button:has-text("#321 Konvertierung")');
 
+  await expect(page.locator('.log-panel')).toHaveCount(0);
+  await page.getByRole('button', { name: /Details \/ Log anzeigen/ }).click();
   await expect(page.locator('.log-panel')).toContainText('Conversion finished');
   await page.locator('button:has-text("Aktualisieren")').click();
   await expect(page.locator('.log-panel')).toContainText('Conversion finished');
@@ -350,5 +352,110 @@ test('hides expired jobs from the frontend lists', async ({ page }) => {
   await expect(page.getByText('#12 Konvertierung')).toBeVisible();
   await expect(page.getByText('Auftrag #12')).toBeVisible();
   await expect(page.getByText('Auftrag #11')).toHaveCount(0);
+});
+
+test('shows document formats for uploaded office files', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: {
+          formats: {
+            video: ['mp4'],
+            audio: ['mp3'],
+            image: ['webp'],
+            document: ['docx', 'pdf', 'html'],
+            pdf: ['pdf', 'txt'],
+            text: ['txt', 'pdf'],
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+  await page.setInputFiles('#file-upload', {
+    name: 'report.docx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    buffer: Buffer.from('fake-docx'),
+  });
+
+  await expect(page.getByText('Dokument erkannt')).toBeVisible();
+  await page.getByRole('button', { name: /DOCX Dokument/ }).click();
+  await expect(page.locator('.format-menu')).toBeVisible();
+  await expect(page.locator('.format-results').getByRole('button', { name: /PDF/ })).toBeVisible();
+  await expect(page.locator('.format-results').getByRole('button', { name: /HTML/ })).toBeVisible();
+});
+
+test('extends and deletes finished jobs from the frontend', async ({ page }) => {
+  let job = {
+    id: 44,
+    type: 'convert',
+    status: 'success',
+    progress: 100,
+    current_step: 'Fertig',
+    output_path: '/data/output/job-44.pdf',
+    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  };
+
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: { formats: { video: ['mp4'], audio: ['mp3'], image: ['webp'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs/44/extend', (route) => {
+    job = { ...job, expires_at: new Date(Date.now() + 25 * 60 * 60 * 1000).toISOString() };
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(job) });
+  });
+
+  await page.route('**/api/jobs/44', (route) => {
+    if (route.request().method() === 'DELETE') {
+      job = { ...job, status: 'deleted', output_path: null };
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(job) });
+      return;
+    }
+    route.fallback();
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(job.status === 'deleted' ? [] : [job]),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+
+  await expect(page.getByText('Löscht in')).toBeVisible();
+  await page.locator('.download-row').getByRole('button', { name: 'Verlängern' }).click();
+  await expect(page.getByText('Auftrag #44 wurde um 24h verlängert.')).toBeVisible();
+
+  await page.locator('.download-row').getByRole('button', { name: 'Löschen' }).click();
+  await expect(page.getByText('#44 Konvertierung')).toHaveCount(0);
+  await expect(page.locator('.download-row')).toHaveCount(0);
 });
 

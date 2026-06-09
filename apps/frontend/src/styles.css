@@ -329,6 +329,11 @@ h2 {
   gap: 0.8rem;
 }
 
+.detail-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .panel-header {
   padding: 1.1rem 1.1rem 0;
 }
@@ -935,6 +940,7 @@ h2 {
   display: flex;
   width: 100%;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.8rem;
   border: 1px solid var(--border);
@@ -1032,6 +1038,10 @@ h2 {
   gap: 0.5rem 1rem;
   padding: 0.8rem 1.1rem 0;
   font-size: 0.9rem;
+}
+
+.detail-toggle {
+  margin: 0.9rem 1.1rem 0;
 }
 
 .log-panel {

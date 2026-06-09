@@ -7,11 +7,12 @@ It provides a FastAPI backend, a Celery/Redis worker pipeline, ffmpeg-based medi
 ## Features
 
 - Download online media and convert it to common audio or video formats.
-- Convert uploaded audio, video and image files.
+- Convert uploaded audio, video, image, PDF, Office and OpenDocument files.
 - Choose quality presets, target format and advanced codec settings.
 - Stream job progress and logs with Server-Sent Events.
-- Keep generated output files for 24 hours by default, then delete them automatically to save storage.
-- Hide expired jobs from the frontend job lists after cleanup.
+- Keep generated output files for 24 hours by default, show a live deletion timer and delete them automatically to save storage.
+- Extend individual finished jobs by 24 hours or delete them manually before expiry.
+- Hide expired and manually deleted jobs from the frontend job lists.
 - Remove uploaded source files after processing.
 
 ## Supported Output Formats
@@ -32,6 +33,30 @@ Image:
 
 ```text
 webp, jpg, jpeg, png, avif, gif, bmp, tiff, tif
+```
+
+Documents:
+
+```text
+docx, doc, odt, rtf, txt, html, pdf
+```
+
+Spreadsheets:
+
+```text
+xlsx, xls, ods, csv, html, pdf
+```
+
+Presentations:
+
+```text
+pptx, ppt, odp, html, pdf
+```
+
+PDF/Text:
+
+```text
+pdf, txt, html
 ```
 
 HEIC/HEIF files are recognized as image inputs when possible, but they are not offered as target formats unless the ffmpeg build reliably supports writing them.
@@ -90,11 +115,14 @@ DATA_OUTPUT_DIR=/data/output
 MAX_UPLOAD_BYTES=2147483648
 OUTPUT_RETENTION_HOURS=24
 OUTPUT_CLEANUP_INTERVAL_SECONDS=3600
+DOCUMENT_CONVERT_TIMEOUT_SECONDS=120
 ```
 
 `OUTPUT_RETENTION_HOURS` controls how long successful output files remain downloadable. The default is 24 hours.
 
 `OUTPUT_CLEANUP_INTERVAL_SECONDS` controls how often the API checks for expired output files. The default is 3600 seconds. Set it to `0` to disable the background cleanup loop; `/api/jobs` still performs a cleanup pass before returning jobs.
+
+`DOCUMENT_CONVERT_TIMEOUT_SECONDS` controls the LibreOffice/Poppler conversion timeout for uploaded document jobs.
 
 Runtime files are stored in `data/` locally and mounted as `/data` inside the containers. This directory is ignored by Git.
 
@@ -107,6 +135,8 @@ Generated output files are deleted after the configured retention window. When a
 - `output_path` is cleared
 - the job no longer appears in the default frontend job lists
 - logs and database history remain available for audit/debugging
+
+Users can extend a finished job by 24 hours per click or delete it manually before expiry. Manual deletion marks the job as `deleted`, removes the output file and hides the job from the default frontend lists.
 
 Uploads are temporary processing inputs and are removed by the worker after conversion.
 
@@ -139,7 +169,7 @@ npx playwright test --config=playwright.config.ts
 
 The API image builds the frontend and copies the Vite output to `/app/static`. Do not commit `apps/frontend/dist`.
 
-The worker image installs ffmpeg and runs Celery. Actual codec availability depends on the ffmpeg package in the image.
+The worker image installs ffmpeg, LibreOffice, Poppler tools and fonts, then runs Celery. Actual codec availability depends on the ffmpeg package in the image.
 
 Checks before deployment:
 

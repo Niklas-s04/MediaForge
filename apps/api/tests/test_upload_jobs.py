@@ -116,6 +116,22 @@ def test_normalizers_accept_extended_output_formats():
     assert image["source_family"] == "image"
     assert image["output_format"] == "avif"
 
+    document = api_main.normalize_convert_options(
+        file=fake_upload(
+            "report.docx",
+            b"doc",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        compression_family="pdf",
+        compression_profile="balanced",
+        output_format="pdf",
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    assert document["source_family"] == "document"
+    assert document["family"] == "pdf"
+    assert document["output_format"] == "pdf"
+
 
 def test_store_upload_file_removes_partial_file_when_too_large(tmp_path):
     upload_dir = tmp_path / "uploads"

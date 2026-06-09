@@ -4,7 +4,15 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ffmpeg git ca-certificates \
+	&& apt-get install -y --no-install-recommends \
+		ffmpeg \
+		git \
+		ca-certificates \
+		libreoffice-writer \
+		libreoffice-calc \
+		libreoffice-impress \
+		poppler-utils \
+		fonts-dejavu \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY apps/worker/requirements.txt ./apps/worker/requirements.txt

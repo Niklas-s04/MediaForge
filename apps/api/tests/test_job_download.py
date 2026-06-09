@@ -149,3 +149,92 @@ def test_media_options_include_added_common_formats():
     assert {"alac", "wma", "oga"}.issubset(set(options["convert"]["formats"]["audio"]))
     assert "tif" in options["convert"]["formats"]["image"]
     assert "heic" not in options["convert"]["formats"]["image"]
+    assert {"document", "spreadsheet", "presentation", "pdf", "text"}.issubset(set(options["convert"]["formats"]))
+    assert {"docx", "pdf", "html"}.issubset(set(options["convert"]["formats"]["document"]))
+    assert {"xlsx", "csv", "pdf"}.issubset(set(options["convert"]["formats"]["spreadsheet"]))
+    assert {"pptx", "odp", "pdf"}.issubset(set(options["convert"]["formats"]["presentation"]))
+
+
+def test_retention_column_migration_adds_missing_sqlite_columns(monkeypatch, tmp_path: Path):
+    db_path = tmp_path / "legacy.sqlite3"
+    legacy_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE job (id INTEGER PRIMARY KEY, type VARCHAR NOT NULL, status VARCHAR NOT NULL)"
+        )
+
+    monkeypatch.setattr(api_main, "engine", legacy_engine)
+    api_main.ensure_job_retention_columns()
+    api_main.ensure_job_retention_columns()
+
+    with legacy_engine.begin() as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(job)").fetchall()}
+
+    assert {"expires_at", "deleted_at"}.issubset(columns)
+
+
+def test_extend_job_output_adds_24_hours(monkeypatch, tmp_path: Path):
+    engine = create_test_engine()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_file = output_dir / "result.pdf"
+    output_file.write_bytes(b"pdf")
+    now = datetime.utcnow()
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+
+    with Session(engine) as session:
+        job = Job(
+            type="convert",
+            status="success",
+            output_path=str(output_file),
+            input={},
+            finished_at=now,
+            expires_at=now + timedelta(hours=3),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        original_expiry = job.expires_at
+
+        updated = api_main.extend_job_output(job.id, session=session)
+
+    assert updated.expires_at == original_expiry + timedelta(hours=24)
+
+
+def test_extend_job_output_rejects_unavailable_jobs():
+    engine = create_test_engine()
+
+    with Session(engine) as session:
+        job = Job(type="convert", status="expired", input={})
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        with pytest.raises(HTTPException) as exc:
+            api_main.extend_job_output(job.id, session=session)
+
+    assert exc.value.status_code == 410
+
+
+def test_delete_job_output_removes_file_and_hides_job(monkeypatch, tmp_path: Path):
+    engine = create_test_engine()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_file = output_dir / "result.docx"
+    output_file.write_bytes(b"docx")
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+
+    with Session(engine) as session:
+        job = Job(type="convert", status="success", output_path=str(output_file), input={})
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        deleted = api_main.delete_job_output(job.id, session=session)
+        visible_jobs = api_main.list_jobs(session=session)
+        all_jobs = api_main.list_jobs(session=session, include_expired=True)
+
+    assert deleted.status == "deleted"
+    assert not output_file.exists()
+    assert visible_jobs == []
+    assert all_jobs[0].status == "deleted"

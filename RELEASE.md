@@ -47,12 +47,13 @@ DATA_OUTPUT_DIR
 MAX_UPLOAD_BYTES
 OUTPUT_RETENTION_HOURS
 OUTPUT_CLEANUP_INTERVAL_SECONDS
+DOCUMENT_CONVERT_TIMEOUT_SECONDS
 ```
 
 ## 4. Data And Backups
 
 - SQLite database, logs, temporary files and generated media live under `data/`.
-- Generated output files are deleted after `OUTPUT_RETENTION_HOURS` and expired jobs are hidden from the default frontend lists.
+- Generated output files are deleted after `OUTPUT_RETENTION_HOURS`; expired and manually deleted jobs are hidden from the default frontend lists.
 - Back up `data/db.sqlite3` before updates.
 - Do not commit `data/` to GitHub.
 
@@ -69,4 +70,6 @@ Before pushing:
 - `GET /health` returns `{ "status": "ok" }`.
 - Frontend opens at the configured `API_PORT`.
 - A test job can be created and logs stream over SSE.
+- A finished job shows a deletion timer, can be extended, and can be manually deleted.
+- An uploaded DOCX/PDF/XLSX/PPTX test file can be converted with the worker image.
 - Worker processes queued jobs.

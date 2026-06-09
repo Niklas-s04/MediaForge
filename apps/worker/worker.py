@@ -11,6 +11,7 @@ import subprocess
 import glob
 import json
 import re
+import tempfile
 from apps.api.app.compression_goals import resolve_compression_family, get_compression_profile
 from apps.api.app.models import Flow, FlowRun, Job
 
@@ -23,8 +24,26 @@ DEFAULT_FORMATS = {
     "audio": "mp3",
     "video": "mp4",
     "image": "webp",
+    "document": "docx",
+    "spreadsheet": "xlsx",
+    "presentation": "pptx",
+    "pdf": "pdf",
+    "text": "txt",
 }
 IMAGE_FORMATS = {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff", "tif"}
+DOCUMENT_FORMATS = {"docx", "doc", "odt", "rtf", "txt", "html", "pdf"}
+SPREADSHEET_FORMATS = {"xlsx", "xls", "ods", "csv", "html", "pdf"}
+PRESENTATION_FORMATS = {"pptx", "ppt", "odp", "html", "pdf"}
+PDF_FORMATS = {"pdf", "txt"}
+TEXT_FORMATS = {"txt", "html", "pdf", "docx", "odt", "rtf"}
+DOCUMENT_FAMILIES = {"document", "spreadsheet", "presentation", "pdf", "text"}
+DOCUMENT_OUTPUT_FORMATS = {
+    "document": DOCUMENT_FORMATS,
+    "spreadsheet": SPREADSHEET_FORMATS,
+    "presentation": PRESENTATION_FORMATS,
+    "pdf": PDF_FORMATS,
+    "text": TEXT_FORMATS,
+}
 VIDEO_CODECS = {
     "libx264",
     "libx265",
@@ -126,6 +145,23 @@ def _get_engine():
 
 def _get_upload_dir() -> str:
     return os.environ.get("DATA_UPLOAD_DIR", "/data/uploads")
+
+
+def _output_expiry(finished_at: datetime.datetime | None = None) -> datetime.datetime:
+    raw = os.environ.get("OUTPUT_RETENTION_HOURS", "24")
+    try:
+        hours = max(0.0, float(raw))
+    except Exception:
+        hours = 24.0
+    return (finished_at or datetime.datetime.utcnow()) + datetime.timedelta(hours=hours)
+
+
+def _document_timeout() -> int:
+    raw = os.environ.get("DOCUMENT_CONVERT_TIMEOUT_SECONDS", "120")
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return 120
 
 
 def _is_path_inside(base_dir: str, target_path: str) -> bool:
@@ -454,6 +490,54 @@ def _image_filter(quality: str) -> list[str]:
     ]
 
 
+def _source_extension(path: str) -> str:
+    return os.path.splitext(path)[1].lower().lstrip(".")
+
+
+def _run_document_conversion(input_path: str, output_path: str, family: str, output_format: str):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    source_ext = _source_extension(input_path)
+    output_format = output_format.lower().lstrip(".")
+
+    if source_ext == output_format:
+        shutil.copyfile(input_path, output_path)
+        return
+
+    if family == "pdf" and output_format == "txt":
+        subprocess.run(
+            ["pdftotext", input_path, output_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_document_timeout(),
+        )
+        return
+
+    with tempfile.TemporaryDirectory() as tmp_outdir:
+        cmd = [
+            "soffice",
+            "--headless",
+            "--nologo",
+            "--nofirststartwizard",
+            "--convert-to",
+            output_format,
+            "--outdir",
+            tmp_outdir,
+            input_path,
+        ]
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_document_timeout(),
+        )
+        candidates = sorted(glob.glob(os.path.join(tmp_outdir, f"*.{output_format}")))
+        if not candidates:
+            raise RuntimeError(f"Document conversion produced no .{output_format} output")
+        shutil.move(candidates[0], output_path)
+
+
 def _build_media_command(
     input_path: str,
     output_path: str,
@@ -756,6 +840,7 @@ def process_download_and_convert(self, job_id: int):
             job.current_step = "Fertig"
             job.output_path = outpath
             job.finished_at = datetime.datetime.utcnow()
+            job.expires_at = _output_expiry(job.finished_at)
             session.add(job)
             session.commit()
             # cleanup tmp
@@ -843,35 +928,53 @@ def process_convert(self, job_id: int):
                 allowed_output_families = {"audio"}
             elif source_family == "image":
                 allowed_output_families = {"image"}
+            elif source_family == "document":
+                allowed_output_families = {"document", "pdf", "text"}
+            elif source_family == "spreadsheet":
+                allowed_output_families = {"spreadsheet", "pdf", "text"}
+            elif source_family == "presentation":
+                allowed_output_families = {"presentation", "pdf"}
+            elif source_family == "pdf":
+                allowed_output_families = {"pdf", "text"}
+            elif source_family == "text":
+                allowed_output_families = {"text", "document", "pdf"}
             else:
                 allowed_output_families = {source_family}
             requested_family = str(input_obj.get("compression_family") or input_obj.get("output_family") or source_family).lower()
             family = requested_family if requested_family in allowed_output_families else source_family
             output_format = _clean_choice(
                 input_obj.get("output_format"),
-                set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else IMAGE_FORMATS,
+                (
+                    DOCUMENT_OUTPUT_FORMATS[family]
+                    if family in DOCUMENT_FAMILIES
+                    else set(FORMAT_CODECS.get(family, {}).keys()) if family != "image" else IMAGE_FORMATS
+                ),
                 DEFAULT_FORMATS.get(family, "mp3"),
             )
             strip_metadata = bool(input_obj.get("strip_metadata", True))
 
             stem = _safe_stem(original_name, f"job-{job_id}")
             outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{output_format}")
-            cmd = _build_media_command(input_path, outpath, family, output_format, quality, strip_metadata, input_obj)
 
             _log(job_id, f"Starting local conversion: {input_path}")
             _log(job_id, f"Output decision: source_family={source_family} family={family} format={output_format} quality={quality}")
             _set_job_progress(session, job, 35, "Konvertierung laeuft", force=True)
 
             try:
-                _run_ffmpeg_with_progress(
-                    cmd,
-                    session=session,
-                    job=job,
-                    input_path=input_path,
-                    start_progress=35,
-                    end_progress=95,
-                    step="Konvertierung laeuft",
-                )
+                if family in DOCUMENT_FAMILIES:
+                    _run_document_conversion(input_path, outpath, family, output_format)
+                    _set_job_progress(session, job, 95, "Dokument konvertiert", force=True)
+                else:
+                    cmd = _build_media_command(input_path, outpath, family, output_format, quality, strip_metadata, input_obj)
+                    _run_ffmpeg_with_progress(
+                        cmd,
+                        session=session,
+                        job=job,
+                        input_path=input_path,
+                        start_progress=35,
+                        end_progress=95,
+                        step="Konvertierung laeuft",
+                    )
             except Exception as e:
                 _log(job_id, f"Conversion failed: {e}")
                 job.status = "failed"
@@ -887,6 +990,7 @@ def process_convert(self, job_id: int):
             job.current_step = "Fertig"
             job.output_path = outpath
             job.finished_at = datetime.datetime.utcnow()
+            job.expires_at = _output_expiry(job.finished_at)
             session.add(job)
             session.commit()
             return {"output": outpath}

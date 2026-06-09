@@ -248,6 +248,59 @@ def test_build_media_command_accepts_added_codec_options():
     assert "wmav2" in wma_cmd
 
 
+def test_run_document_conversion_uses_libreoffice(monkeypatch, tmp_path):
+    input_file = tmp_path / "input.docx"
+    input_file.write_bytes(b"docx")
+    output_file = tmp_path / "out" / "result.pdf"
+    captured = {}
+
+    def fake_run(cmd, check, stdout, stderr, timeout):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        (outdir / "input.pdf").write_bytes(b"pdf")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("DOCUMENT_CONVERT_TIMEOUT_SECONDS", "77")
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    worker._run_document_conversion(str(input_file), str(output_file), "document", "pdf")
+
+    assert output_file.read_bytes() == b"pdf"
+    assert captured["cmd"][0] == "soffice"
+    assert "--headless" in captured["cmd"]
+    assert captured["timeout"] == 77
+
+
+def test_run_document_conversion_extracts_pdf_text(monkeypatch, tmp_path):
+    input_file = tmp_path / "input.pdf"
+    input_file.write_bytes(b"pdf")
+    output_file = tmp_path / "result.txt"
+    captured = {}
+
+    def fake_run(cmd, check, stdout, stderr, timeout):
+        captured["cmd"] = cmd
+        Path(cmd[-1]).write_text("extracted", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    worker._run_document_conversion(str(input_file), str(output_file), "pdf", "txt")
+
+    assert captured["cmd"][0] == "pdftotext"
+    assert output_file.read_text(encoding="utf-8") == "extracted"
+
+
+def test_run_document_conversion_copies_same_format(tmp_path):
+    input_file = tmp_path / "input.pdf"
+    input_file.write_bytes(b"pdf")
+    output_file = tmp_path / "result.pdf"
+
+    worker._run_document_conversion(str(input_file), str(output_file), "pdf", "pdf")
+
+    assert output_file.read_bytes() == b"pdf"
+
+
 def test_download_progress_hook_maps_known_and_unknown_totals():
     progress, step = worker._download_progress_from_hook(
         {"status": "downloading", "downloaded_bytes": 50, "total_bytes": 100, "speed": 2048, "eta": 4},

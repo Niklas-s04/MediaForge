@@ -8,10 +8,13 @@ type Job = {
   progress?: number
   current_step?: string | null
   output_path?: string | null
+  created_at?: string | null
+  finished_at?: string | null
+  expires_at?: string | null
 }
 
 type ActiveTab = 'download' | 'convert'
-type MediaFamily = 'video' | 'audio' | 'image'
+type MediaFamily = 'video' | 'audio' | 'image' | 'document' | 'spreadsheet' | 'presentation' | 'pdf' | 'text'
 type QualityPreset = 'high' | 'balanced' | 'small'
 
 type FormatDef = {
@@ -65,7 +68,7 @@ type AdvancedValues = {
   image_quality: string
 }
 
-const terminalStatuses = ['success', 'failed', 'cancelled', 'expired', 'notfound']
+const terminalStatuses = ['success', 'failed', 'cancelled', 'expired', 'deleted', 'notfound']
 
 const formatCatalog: Record<MediaFamily, FormatDef[]> = {
   video: [
@@ -107,13 +110,56 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'image', value: 'tiff', label: 'TIFF', text: 'Druck, Scan und Archiv' },
     { family: 'image', value: 'tif', label: 'TIF', text: 'TIFF-Variante für Scan-Workflows' },
   ],
+  document: [
+    { family: 'document', value: 'docx', label: 'DOCX', text: 'Modernes Word-Dokument' },
+    { family: 'document', value: 'doc', label: 'DOC', text: 'Älteres Word-Dokument' },
+    { family: 'document', value: 'odt', label: 'ODT', text: 'OpenDocument-Textdatei' },
+    { family: 'document', value: 'rtf', label: 'RTF', text: 'Rich-Text-Dokument' },
+    { family: 'document', value: 'txt', label: 'TXT', text: 'Einfacher Text' },
+    { family: 'document', value: 'html', label: 'HTML', text: 'Web-/Archivansicht' },
+    { family: 'document', value: 'pdf', label: 'PDF', text: 'Dokument als PDF exportieren' },
+  ],
+  spreadsheet: [
+    { family: 'spreadsheet', value: 'xlsx', label: 'XLSX', text: 'Moderne Excel-Arbeitsmappe' },
+    { family: 'spreadsheet', value: 'xls', label: 'XLS', text: 'Ältere Excel-Arbeitsmappe' },
+    { family: 'spreadsheet', value: 'ods', label: 'ODS', text: 'OpenDocument-Tabelle' },
+    { family: 'spreadsheet', value: 'csv', label: 'CSV', text: 'Kommagetrennte Werte' },
+    { family: 'spreadsheet', value: 'html', label: 'HTML', text: 'Tabelle als HTML' },
+    { family: 'spreadsheet', value: 'pdf', label: 'PDF', text: 'Tabelle als PDF exportieren' },
+  ],
+  presentation: [
+    { family: 'presentation', value: 'pptx', label: 'PPTX', text: 'Moderne PowerPoint-Datei' },
+    { family: 'presentation', value: 'ppt', label: 'PPT', text: 'Ältere PowerPoint-Datei' },
+    { family: 'presentation', value: 'odp', label: 'ODP', text: 'OpenDocument-Präsentation' },
+    { family: 'presentation', value: 'html', label: 'HTML', text: 'Präsentation als HTML' },
+    { family: 'presentation', value: 'pdf', label: 'PDF', text: 'Folien als PDF exportieren' },
+  ],
+  pdf: [
+    { family: 'pdf', value: 'pdf', label: 'PDF', text: 'PDF beibehalten' },
+    { family: 'pdf', value: 'txt', label: 'TXT', text: 'Text aus PDF extrahieren' },
+  ],
+  text: [
+    { family: 'text', value: 'txt', label: 'TXT', text: 'Einfacher Text' },
+    { family: 'text', value: 'html', label: 'HTML', text: 'Text als HTML' },
+    { family: 'text', value: 'pdf', label: 'PDF', text: 'Text als PDF exportieren' },
+    { family: 'text', value: 'docx', label: 'DOCX', text: 'Text als Word-Dokument' },
+    { family: 'text', value: 'odt', label: 'ODT', text: 'Text als OpenDocument' },
+    { family: 'text', value: 'rtf', label: 'RTF', text: 'Text als Rich Text' },
+  ],
 }
 
 const familyLabels: Record<MediaFamily, string> = {
   video: 'Video',
   audio: 'Audio',
   image: 'Bild',
+  document: 'Dokument',
+  spreadsheet: 'Tabelle',
+  presentation: 'Präsentation',
+  pdf: 'PDF',
+  text: 'Text',
 }
+
+const mediaFamilies: MediaFamily[] = ['video', 'audio', 'image', 'document', 'spreadsheet', 'presentation', 'pdf', 'text']
 
 const qualityOptions: { value: QualityPreset; label: string; text: string }[] = [
   { value: 'high', label: 'Originalnah', text: 'Mehr Qualität, größere Datei' },
@@ -202,6 +248,25 @@ function formatEta(seconds?: number | null) {
   return `${mins} Min. ${String(secs).padStart(2, '0')} Sek. verbleibend`
 }
 
+function expirySeconds(expiresAt?: string | null, now = Date.now()) {
+  if (!expiresAt) return null
+  const target = new Date(expiresAt).getTime()
+  if (!Number.isFinite(target)) return null
+  return Math.max(0, Math.ceil((target - now) / 1000))
+}
+
+function formatExpiry(expiresAt?: string | null, now = Date.now()) {
+  const seconds = expirySeconds(expiresAt, now)
+  if (seconds === null) return 'Löschzeit unbekannt'
+  if (seconds <= 0) return 'Wird gelöscht'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  const secs = seconds % 60
+  if (days > 0) return `Löscht in ${days} T ${hours} Std.`
+  return `Löscht in ${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
 function estimateEta(loaded: number, total: number | undefined, startedAt: number) {
   if (!total || loaded <= 0) return null
   const elapsedSeconds = (Date.now() - startedAt) / 1000
@@ -242,9 +307,19 @@ function inferFamily(file: File | null): MediaFamily {
   if (file.type.startsWith('audio/')) return 'audio'
   if (file.type.startsWith('image/')) return 'image'
   if (file.type.startsWith('video/')) return 'video'
+  if (file.type === 'application/pdf') return 'pdf'
+  if (file.type.startsWith('text/')) return file.name.toLowerCase().endsWith('.csv') ? 'spreadsheet' : 'text'
+  if (file.type.includes('wordprocessingml') || file.type.includes('msword') || file.type.includes('opendocument.text')) return 'document'
+  if (file.type.includes('spreadsheetml') || file.type.includes('ms-excel') || file.type.includes('opendocument.spreadsheet')) return 'spreadsheet'
+  if (file.type.includes('presentationml') || file.type.includes('ms-powerpoint') || file.type.includes('opendocument.presentation')) return 'presentation'
   const ext = file.name.split('.').pop()?.toLowerCase()
-  if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'aiff', 'aif'].includes(ext)) return 'audio'
-  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif'].includes(ext)) return 'image'
+  if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus', 'aiff', 'aif', 'alac', 'wma'].includes(ext)) return 'audio'
+  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif'].includes(ext)) return 'image'
+  if (ext && ['docx', 'doc', 'odt', 'rtf'].includes(ext)) return 'document'
+  if (ext && ['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return 'spreadsheet'
+  if (ext && ['pptx', 'ppt', 'odp'].includes(ext)) return 'presentation'
+  if (ext === 'pdf') return 'pdf'
+  if (ext && ['txt', 'html', 'htm'].includes(ext)) return 'text'
   return 'video'
 }
 
@@ -256,18 +331,24 @@ function fileExt(name?: string | null) {
 function allowedConvertFamilies(sourceFamily: MediaFamily): MediaFamily[] {
   if (sourceFamily === 'video') return ['video', 'audio']
   if (sourceFamily === 'audio') return ['audio']
-  return ['image']
+  if (sourceFamily === 'image') return ['image']
+  if (sourceFamily === 'document') return ['document', 'pdf', 'text']
+  if (sourceFamily === 'spreadsheet') return ['spreadsheet', 'pdf', 'text']
+  if (sourceFamily === 'presentation') return ['presentation', 'pdf']
+  if (sourceFamily === 'pdf') return ['pdf', 'text']
+  if (sourceFamily === 'text') return ['text', 'document', 'pdf']
+  return [sourceFamily]
 }
 
 function findFormat(catalog: Record<MediaFamily, FormatDef[]>, family: MediaFamily, value: string): FormatDef {
-  return catalog[family].find((format) => format.value === value) || catalog[family][0] || formatCatalog[family][0]
+  return catalog[family]?.find((format) => format.value === value) || catalog[family]?.[0] || formatCatalog[family][0]
 }
 
 function buildCatalogFromOptions(options: OptionsResponse | null, scope: 'download' | 'convert') {
   const serverFormats = options?.[scope]?.formats
   if (!serverFormats) return formatCatalog
   const next = { ...formatCatalog } as Record<MediaFamily, FormatDef[]>
-  ;(['video', 'audio', 'image'] as MediaFamily[]).forEach((family) => {
+  mediaFamilies.forEach((family) => {
     const allowed = serverFormats[family]
     if (!allowed?.length) return
     next[family] = allowed.map((value) => {
@@ -615,13 +696,20 @@ function ConversionCard({
 function JobDetail({
   job,
   onDownload,
+  onDelete,
+  onExtend,
   onTerminal,
+  now,
 }: {
   job: Job | null
   onDownload: (job: Job) => void
+  onDelete: (job: Job) => void
+  onExtend: (job: Job) => void
   onTerminal: () => void
+  now: number
 }) {
   const [log, setLog] = useState<string>('')
+  const [logOpen, setLogOpen] = useState(false)
   const [status, setStatus] = useState<string>('')
   const [progress, setProgress] = useState<number>(0)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
@@ -640,6 +728,7 @@ function JobDetail({
     setStatus(job.status || '')
     setProgress(job.progress ?? 0)
     setCurrentStep(job.current_step || null)
+    setLogOpen(false)
 
     const connect = async () => {
       controller = new AbortController()
@@ -673,7 +762,7 @@ function JobDetail({
             if (dataLine) {
               try {
                 const payload = JSON.parse(dataLine.replace(/^data:\s*/, ''))
-                if (!mounted) break
+        if (!mounted) break
                 if (payload.chunk !== undefined) setLog((prev) => (prev || '') + payload.chunk)
                 if (payload.progress !== undefined) setProgress(Number(payload.progress) || 0)
                 if (payload.current_step !== undefined) setCurrentStep(payload.current_step || null)
@@ -716,6 +805,8 @@ function JobDetail({
     return <EmptyState title="Kein Auftrag ausgewählt" text="Wähle einen Auftrag aus, um Details und Logs zu sehen." />
   }
 
+  const isDownloadable = job.status === 'success' && !!job.output_path
+
   return (
     <section className="panel job-detail">
       <div className="panel-header compact">
@@ -725,9 +816,19 @@ function JobDetail({
         </div>
         <div className="detail-actions">
           <StatusBadge status={status || job.status} />
-          {job.status === 'success' && job.output_path ? (
+          {isDownloadable ? (
             <button className="button primary" type="button" onClick={() => onDownload(job)}>
               Herunterladen
+            </button>
+          ) : null}
+          {isDownloadable ? (
+            <button className="button secondary" type="button" onClick={() => onExtend(job)}>
+              Verlängern
+            </button>
+          ) : null}
+          {job.output_path || ['success', 'failed', 'expired'].includes((job.status || '').toLowerCase()) ? (
+            <button className="button ghost" type="button" onClick={() => onDelete(job)}>
+              Löschen
             </button>
           ) : null}
         </div>
@@ -735,6 +836,7 @@ function JobDetail({
       <div className="detail-meta">
         <span>{job.type === 'convert' ? 'Konvertierung' : 'Download'}</span>
         <span>{currentStep || job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet auf Verarbeitung')}</span>
+        {isDownloadable ? <span>{formatExpiry(job.expires_at, now)}</span> : null}
       </div>
       <div className="detail-progress">
         <ProgressMeter
@@ -743,7 +845,10 @@ function JobDetail({
           eta={null}
         />
       </div>
-      <pre ref={logRef} className="log-panel">{log || 'Noch keine Logs vorhanden.'}</pre>
+      <button className="button secondary detail-toggle" type="button" onClick={() => setLogOpen((open) => !open)}>
+        {logOpen ? 'Details / Log ausblenden' : 'Details / Log anzeigen'}
+      </button>
+      {logOpen ? <pre ref={logRef} className="log-panel">{log || 'Noch keine Logs vorhanden.'}</pre> : null}
     </section>
   )
 }
@@ -777,6 +882,7 @@ function App() {
   const [transfer, setTransfer] = useState<TransferState | null>(null)
   const [downloadCatalog, setDownloadCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
   const [convertCatalog, setConvertCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
+  const [now, setNow] = useState(Date.now())
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) || null, [jobs, selectedId])
@@ -797,7 +903,7 @@ function App() {
         return
       }
       const d = await r.json()
-      setJobs(Array.isArray(d) ? d.filter((job) => (job.status || '').toLowerCase() !== 'expired') : [])
+      setJobs(Array.isArray(d) ? d.filter((job) => !['expired', 'deleted'].includes((job.status || '').toLowerCase())) : [])
     } catch (e) {
       setJobs([])
     }
@@ -824,6 +930,11 @@ function App() {
     const interval = window.setInterval(loadJobs, 5000)
     return () => window.clearInterval(interval)
   }, [loadJobs])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -1161,6 +1272,36 @@ function App() {
     }
   }
 
+  const extendJob = async (job: Job) => {
+    try {
+      const r = await fetch(`/api/jobs/${job.id}/extend`, { method: 'POST' })
+      if (!r.ok) {
+        setMessage('Auftrag konnte nicht verlängert werden.')
+        return
+      }
+      const updated = await r.json()
+      setJobs((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      setMessage(`Auftrag #${job.id} wurde um 24h verlängert.`)
+    } catch (e) {
+      setMessage('Auftrag konnte nicht verlängert werden.')
+    }
+  }
+
+  const deleteJob = async (job: Job) => {
+    try {
+      const r = await fetch(`/api/jobs/${job.id}`, { method: 'DELETE' })
+      if (!r.ok) {
+        setMessage('Auftrag konnte nicht gelöscht werden.')
+        return
+      }
+      setJobs((current) => current.filter((item) => item.id !== job.id))
+      setSelectedId((current) => (current === job.id ? null : current))
+      setMessage(`Auftrag #${job.id} wurde gelöscht.`)
+    } catch (e) {
+      setMessage('Auftrag konnte nicht gelöscht werden.')
+    }
+  }
+
   const confirmPendingWarning = () => {
     if (pendingAction === 'download') createDownloadJob(true)
     else createConvertJob(true)
@@ -1279,7 +1420,7 @@ function App() {
                   <input id="file-upload" ref={fileInputRef} type="file" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} />
                   <label htmlFor="file-upload" onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
                     <strong>{selectedFile ? selectedFile.name : 'Datei auswählen oder hier ablegen'}</strong>
-                    <span>{selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]} erkannt` : 'Audio, Video oder Bild vom Computer hochladen'}</span>
+                    <span>{selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]} erkannt` : 'Audio, Video, Bild oder Dokument hochladen'}</span>
                   </label>
                 </div>
                 <ConversionCard
@@ -1338,7 +1479,7 @@ function App() {
             {message ? <div className="message">{message}</div> : null}
           </section>
 
-          <JobDetail job={selectedJob} onDownload={downloadJob} onTerminal={loadJobs} />
+          <JobDetail job={selectedJob} onDownload={downloadJob} onDelete={deleteJob} onExtend={extendJob} onTerminal={loadJobs} now={now} />
         </div>
 
         <aside className="side-column">
@@ -1392,8 +1533,11 @@ function App() {
                     <span>
                       <strong>{fallbackDownloadName(job)}</strong>
                       <small>Auftrag #{job.id}</small>
+                      <small>{formatExpiry(job.expires_at, now)}</small>
                     </span>
                     <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
+                    <button className="button secondary" type="button" onClick={() => extendJob(job)}>Verlängern</button>
+                    <button className="button ghost" type="button" onClick={() => deleteJob(job)}>Löschen</button>
                   </div>
                 ))}
               </div>

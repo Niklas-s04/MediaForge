@@ -15,6 +15,9 @@ class JobRead(BaseModel):
     progress: int
     current_step: Optional[str]
     output_path: Optional[str]
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
 
 
 class FlowCreate(BaseModel):
