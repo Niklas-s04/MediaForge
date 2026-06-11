@@ -399,6 +399,66 @@ test('shows document formats for uploaded office files', async ({ page }) => {
   await expect(page.locator('.format-results').getByRole('button', { name: /HTML/ })).toBeVisible();
 });
 
+test('shows canonical image formats and PDF image bridge', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: {
+          formats: {
+            image: ['webp', 'jpg', 'jpeg', 'png', 'tiff', 'tif', 'ico', 'svg'],
+            pdf: ['pdf', 'txt'],
+            text: ['txt', 'pdf'],
+          },
+        },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+  await page.setInputFiles('#file-upload', {
+    name: 'photo.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('fake-jpg'),
+  });
+
+  await expect(page.getByText('Bild erkannt')).toBeVisible();
+  await page.getByRole('button', { name: /WebP Bild/ }).click();
+  await expect(page.locator('.format-results').getByRole('button', { name: /JPG/ })).toBeVisible();
+  await expect(page.locator('.format-results').getByRole('button', { name: /TIFF/ })).toHaveCount(1);
+  await expect(page.locator('.format-results').getByRole('button', { name: /JPEG/ })).toHaveCount(0);
+  await expect(page.locator('.format-results').getByRole('button', { name: /^TIF(?!F)/ })).toHaveCount(0);
+
+  await page.locator('.format-categories').getByRole('button', { name: 'PDF' }).click();
+  await expect(page.locator('.format-results').getByRole('button', { name: /PDF/ })).toBeVisible();
+  await expect(page.locator('.format-results').getByRole('button', { name: /TXT/ })).toHaveCount(0);
+
+  await page.mouse.click(5, 5);
+  await page.setInputFiles('#file-upload', {
+    name: 'scan.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.from('fake-pdf'),
+  });
+
+  await expect(page.getByText('PDF erkannt')).toBeVisible();
+  await page.getByRole('button', { name: /WebP Bild/ }).click();
+  await expect(page.locator('.format-results').getByRole('button', { name: /JPG/ })).toBeVisible();
+  await expect(page.locator('.format-results').getByRole('button', { name: /ICO/ })).toBeVisible();
+  await expect(page.locator('.format-results').getByRole('button', { name: /SVG/ })).toBeVisible();
+});
+
 test('extends and deletes finished jobs from the frontend', async ({ page }) => {
   let job = {
     id: 44,

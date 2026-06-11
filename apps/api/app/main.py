@@ -36,12 +36,18 @@ DOWNLOAD_FORMATS = {
 CONVERT_FORMATS = {
     "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "aiff", "alac", "wma"},
     "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"},
-    "image": {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff", "tif"},
+    "image": {"webp", "jpg", "png", "avif", "gif", "bmp", "tiff", "ico", "svg"},
     "document": {"docx", "doc", "odt", "rtf", "txt", "html", "pdf"},
     "spreadsheet": {"xlsx", "xls", "ods", "csv", "html", "pdf"},
     "presentation": {"pptx", "ppt", "odp", "html", "pdf"},
     "pdf": {"pdf", "txt"},
     "text": {"txt", "html", "pdf", "docx", "odt", "rtf"},
+}
+FORMAT_ALIASES = {
+    "image": {
+        "jpeg": "jpg",
+        "tif": "tiff",
+    },
 }
 QUALITY_PRESETS = {"high", "balanced", "small"}
 DOWNLOAD_QUALITIES = {"best", "1080p", "720p", "480p", "360p"}
@@ -374,7 +380,7 @@ def normalize_convert_options(
     elif source_family == "audio":
         allowed_families = {"audio"}
     elif source_family == "image":
-        allowed_families = {"image"}
+        allowed_families = {"image", "pdf"}
     elif source_family == "document":
         allowed_families = {"document", "pdf", "text"}
     elif source_family == "spreadsheet":
@@ -382,7 +388,7 @@ def normalize_convert_options(
     elif source_family == "presentation":
         allowed_families = {"presentation", "pdf"}
     elif source_family == "pdf":
-        allowed_families = {"pdf", "text"}
+        allowed_families = {"pdf", "text", "image"}
     elif source_family == "text":
         allowed_families = {"text", "document", "pdf"}
     else:
@@ -411,11 +417,16 @@ def normalize_convert_options(
         "pdf": "pdf",
         "text": "txt",
     }[output_family]
-    effective_format = str(requested_format or default_format).lower().lstrip(".")
+    effective_format = normalize_output_format(output_family, requested_format, default_format)
     if effective_format not in CONVERT_FORMATS[output_family]:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported {output_family} conversion format '{effective_format}'",
+        )
+    if source_family == "image" and output_family == "pdf" and effective_format != "pdf":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported image to PDF conversion format '{effective_format}'",
         )
 
     return {
@@ -430,6 +441,11 @@ def normalize_convert_options(
 
 def optional_form_text(value) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def normalize_output_format(family: str, output_format: str | None, fallback: str) -> str:
+    normalized = str(output_format or fallback).lower().lstrip(".")
+    return FORMAT_ALIASES.get(family, {}).get(normalized, normalized)
 
 
 def summarize_download_info(info: dict) -> dict:

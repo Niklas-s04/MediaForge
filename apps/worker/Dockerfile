@@ -12,6 +12,7 @@ RUN apt-get update \
 		libreoffice-calc \
 		libreoffice-impress \
 		poppler-utils \
+		librsvg2-bin \
 		fonts-dejavu \
 	&& rm -rf /var/lib/apt/lists/*
 

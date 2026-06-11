@@ -102,13 +102,13 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
   image: [
     { family: 'image', value: 'webp', label: 'WebP', text: 'Klein, modern und webfreundlich' },
     { family: 'image', value: 'jpg', label: 'JPG', text: 'Fotos und breite Kompatibilität' },
-    { family: 'image', value: 'jpeg', label: 'JPEG', text: 'Alias für JPG in Foto-Workflows' },
     { family: 'image', value: 'png', label: 'PNG', text: 'Grafiken und Transparenz' },
     { family: 'image', value: 'avif', label: 'AVIF', text: 'Sehr effizient für moderne Browser' },
     { family: 'image', value: 'gif', label: 'GIF', text: 'Einzelbild oder einfache Web-Grafik' },
     { family: 'image', value: 'bmp', label: 'BMP', text: 'Unkomprimiert für ältere Anwendungen' },
     { family: 'image', value: 'tiff', label: 'TIFF', text: 'Druck, Scan und Archiv' },
-    { family: 'image', value: 'tif', label: 'TIF', text: 'TIFF-Variante für Scan-Workflows' },
+    { family: 'image', value: 'ico', label: 'ICO', text: 'Icon-Datei für Apps und Websites' },
+    { family: 'image', value: 'svg', label: 'SVG', text: 'Vektorisierte Grafik für Skalierung' },
   ],
   document: [
     { family: 'document', value: 'docx', label: 'DOCX', text: 'Modernes Word-Dokument' },
@@ -314,7 +314,7 @@ function inferFamily(file: File | null): MediaFamily {
   if (file.type.includes('presentationml') || file.type.includes('ms-powerpoint') || file.type.includes('opendocument.presentation')) return 'presentation'
   const ext = file.name.split('.').pop()?.toLowerCase()
   if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus', 'aiff', 'aif', 'alac', 'wma'].includes(ext)) return 'audio'
-  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif'].includes(ext)) return 'image'
+  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif', 'ico', 'svg', 'heic', 'heif'].includes(ext)) return 'image'
   if (ext && ['docx', 'doc', 'odt', 'rtf'].includes(ext)) return 'document'
   if (ext && ['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return 'spreadsheet'
   if (ext && ['pptx', 'ppt', 'odp'].includes(ext)) return 'presentation'
@@ -331,17 +331,25 @@ function fileExt(name?: string | null) {
 function allowedConvertFamilies(sourceFamily: MediaFamily): MediaFamily[] {
   if (sourceFamily === 'video') return ['video', 'audio']
   if (sourceFamily === 'audio') return ['audio']
-  if (sourceFamily === 'image') return ['image']
+  if (sourceFamily === 'image') return ['image', 'pdf']
   if (sourceFamily === 'document') return ['document', 'pdf', 'text']
   if (sourceFamily === 'spreadsheet') return ['spreadsheet', 'pdf', 'text']
   if (sourceFamily === 'presentation') return ['presentation', 'pdf']
-  if (sourceFamily === 'pdf') return ['pdf', 'text']
+  if (sourceFamily === 'pdf') return ['pdf', 'text', 'image']
   if (sourceFamily === 'text') return ['text', 'document', 'pdf']
   return [sourceFamily]
 }
 
+function canonicalFormatValue(family: MediaFamily, value: string) {
+  const normalized = value.toLowerCase()
+  if (family === 'image' && normalized === 'jpeg') return 'jpg'
+  if (family === 'image' && normalized === 'tif') return 'tiff'
+  return normalized
+}
+
 function findFormat(catalog: Record<MediaFamily, FormatDef[]>, family: MediaFamily, value: string): FormatDef {
-  return catalog[family]?.find((format) => format.value === value) || catalog[family]?.[0] || formatCatalog[family][0]
+  const normalized = canonicalFormatValue(family, value)
+  return catalog[family]?.find((format) => format.value === normalized) || catalog[family]?.[0] || formatCatalog[family][0]
 }
 
 function buildCatalogFromOptions(options: OptionsResponse | null, scope: 'download' | 'convert') {
@@ -351,8 +359,11 @@ function buildCatalogFromOptions(options: OptionsResponse | null, scope: 'downlo
   mediaFamilies.forEach((family) => {
     const allowed = serverFormats[family]
     if (!allowed?.length) return
-    next[family] = allowed.map((value) => {
-      const normalized = value.toLowerCase()
+    const seen = new Set<string>()
+    next[family] = allowed.flatMap((value) => {
+      const normalized = canonicalFormatValue(family, value)
+      if (seen.has(normalized)) return []
+      seen.add(normalized)
       return (
         formatCatalog[family].find((format) => format.value === normalized) || {
           family,
@@ -409,7 +420,14 @@ function FormatPicker({
 
   return (
     <div className="format-picker" ref={pickerRef}>
-      <button className="format-button" type="button" onClick={() => onOpenChange(!open)}>
+      <button
+        className="format-button"
+        type="button"
+        onClick={() => {
+          if (!open) setActiveFamily(families.includes(selectedFamily) ? selectedFamily : families[0])
+          onOpenChange(!open)
+        }}
+      >
         <span>{selected.label}</span>
         <small>{familyLabels[selected.family]}</small>
       </button>
@@ -892,6 +910,13 @@ function App() {
     [jobs],
   )
   const convertFamilies = allowedConvertFamilies(sourceFamily)
+  const visibleConvertCatalog = useMemo(() => {
+    if (sourceFamily !== 'image') return convertCatalog
+    return {
+      ...convertCatalog,
+      pdf: convertCatalog.pdf.filter((format) => format.value === 'pdf'),
+    }
+  }, [convertCatalog, sourceFamily])
   const activeQuality = activeTab === 'download' ? downloadQualityPreset : convertQualityPreset
   const activeWarningFamily = activeTab === 'download' ? downloadFamily : convertFamily
 
@@ -974,21 +999,21 @@ function App() {
     const allowed = allowedConvertFamilies(nextSource)
     const nextFamily = allowed.includes(convertFamily) ? convertFamily : allowed[0]
     setConvertFamily(nextFamily)
-    if (!convertCatalog[nextFamily].some((format) => format.value === convertFormat)) {
-      setConvertFormat(convertCatalog[nextFamily][0].value)
+    if (!visibleConvertCatalog[nextFamily].some((format) => format.value === convertFormat)) {
+      setConvertFormat(visibleConvertCatalog[nextFamily][0].value)
     }
-  }, [selectedFile, convertCatalog])
+  }, [selectedFile, convertFamily, convertFormat, convertCatalog, visibleConvertCatalog])
 
   useEffect(() => {
     if (!convertFamilies.includes(convertFamily)) {
       setConvertFamily(convertFamilies[0])
-      setConvertFormat(convertCatalog[convertFamilies[0]][0].value)
+      setConvertFormat(visibleConvertCatalog[convertFamilies[0]][0].value)
       return
     }
-    if (!convertCatalog[convertFamily].some((format) => format.value === convertFormat)) {
-      setConvertFormat(convertCatalog[convertFamily][0].value)
+    if (!visibleConvertCatalog[convertFamily].some((format) => format.value === convertFormat)) {
+      setConvertFormat(visibleConvertCatalog[convertFamily][0].value)
     }
-  }, [convertFamily, convertFormat, convertFamilies, convertCatalog])
+  }, [convertFamily, convertFormat, convertFamilies, visibleConvertCatalog])
 
   useEffect(() => {
     const warningProfile = activeQuality === 'small' ? 'small' : 'balanced'
@@ -1424,7 +1449,7 @@ function App() {
                   </label>
                 </div>
                 <ConversionCard
-                  catalog={convertCatalog}
+                  catalog={visibleConvertCatalog}
                   sourceTitle={selectedFile?.name || 'Keine Datei ausgewählt'}
                   sourceMeta={selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]}` : 'Datei hochladen, dann Ziel-Format wählen'}
                   sourceFormat={selectedFile ? fileExt(selectedFile.name) : 'FILE'}

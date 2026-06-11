@@ -7,4 +7,6 @@ sqlmodel==0.0.8
 python-dotenv==1.0.0
 # SQLAlchemy 2.x may be incompatible with sqlmodel 0.0.8; pin to 1.4.x to be safe
 sqlalchemy==1.4.41
+img2pdf==0.6.3
+vtracer==0.6.15
 

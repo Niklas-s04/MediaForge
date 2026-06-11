@@ -147,7 +147,10 @@ def test_media_options_include_added_common_formats():
 
     assert {"flv", "wmv", "ogv", "ts", "vob"}.issubset(set(options["convert"]["formats"]["video"]))
     assert {"alac", "wma", "oga"}.issubset(set(options["convert"]["formats"]["audio"]))
-    assert "tif" in options["convert"]["formats"]["image"]
+    image_formats = set(options["convert"]["formats"]["image"])
+    assert {"jpg", "tiff", "ico", "svg"}.issubset(image_formats)
+    assert "jpeg" not in image_formats
+    assert "tif" not in image_formats
     assert "heic" not in options["convert"]["formats"]["image"]
     assert {"document", "spreadsheet", "presentation", "pdf", "text"}.issubset(set(options["convert"]["formats"]))
     assert {"docx", "pdf", "html"}.issubset(set(options["convert"]["formats"]["document"]))

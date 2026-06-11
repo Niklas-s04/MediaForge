@@ -4,6 +4,7 @@ import datetime
 import os
 import types
 import sys
+import zipfile
 from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -210,6 +211,10 @@ def test_build_media_command_supports_extended_formats():
     avif_cmd = worker._build_media_command("in.png", "out.avif", "image", "avif", "balanced", True, {})
     assert "libaom-av1" in avif_cmd
 
+    ico_cmd = worker._build_media_command("in.png", "out.ico", "image", "ico", "balanced", True, {})
+    assert ico_cmd[-1] == "out.ico"
+    assert "min(256,iw)" in " ".join(ico_cmd)
+
 
 def test_build_media_command_accepts_added_codec_options():
     av1_cmd = worker._build_media_command(
@@ -299,6 +304,163 @@ def test_run_document_conversion_copies_same_format(tmp_path):
     worker._run_document_conversion(str(input_file), str(output_file), "pdf", "pdf")
 
     assert output_file.read_bytes() == b"pdf"
+
+
+def test_run_image_to_pdf_conversion_uses_img2pdf(monkeypatch, tmp_path):
+    input_file = tmp_path / "photo.jpg"
+    input_file.write_bytes(b"jpg")
+    output_file = tmp_path / "out" / "photo.pdf"
+    captured = {}
+
+    def fake_convert(path):
+        captured["path"] = path
+        return b"pdf"
+
+    fake_img2pdf = types.SimpleNamespace(convert=fake_convert)
+    monkeypatch.setitem(sys.modules, "img2pdf", fake_img2pdf)
+
+    worker._run_image_to_pdf_conversion(str(input_file), str(output_file))
+
+    assert captured["path"] == str(input_file)
+    assert output_file.read_bytes() == b"pdf"
+
+
+def test_run_image_to_pdf_conversion_rasterizes_other_image_formats(monkeypatch, tmp_path):
+    input_file = tmp_path / "photo.webp"
+    input_file.write_bytes(b"webp")
+    output_file = tmp_path / "out" / "photo.pdf"
+    captured = {}
+
+    def fake_check_call(cmd, stdout, stderr):
+        captured["ffmpeg_cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"png")
+        return 0
+
+    def fake_convert(path):
+        captured["img2pdf_path"] = path
+        return b"pdf"
+
+    monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
+    monkeypatch.setitem(sys.modules, "img2pdf", types.SimpleNamespace(convert=fake_convert))
+
+    worker._run_image_to_pdf_conversion(str(input_file), str(output_file))
+
+    assert captured["ffmpeg_cmd"][:4] == ["ffmpeg", "-y", "-i", str(input_file)]
+    assert captured["img2pdf_path"].endswith("image.png")
+    assert output_file.read_bytes() == b"pdf"
+
+
+def test_run_image_vectorization_uses_vtracer(monkeypatch, tmp_path):
+    input_file = tmp_path / "photo.png"
+    input_file.write_bytes(b"png")
+    output_file = tmp_path / "out" / "photo.svg"
+    captured = {}
+
+    def fake_convert(input_path, output_path):
+        captured["input_path"] = input_path
+        captured["output_path"] = output_path
+        Path(output_path).write_text("<svg />", encoding="utf-8")
+
+    monkeypatch.setitem(sys.modules, "vtracer", types.SimpleNamespace(convert_image_to_svg_py=fake_convert))
+
+    worker._run_image_vectorization(str(input_file), str(output_file))
+
+    assert captured == {"input_path": str(input_file), "output_path": str(output_file)}
+    assert output_file.read_text(encoding="utf-8") == "<svg />"
+
+
+def test_run_image_vectorization_rasterizes_non_jpg_png_inputs(monkeypatch, tmp_path):
+    input_file = tmp_path / "photo.webp"
+    input_file.write_bytes(b"webp")
+    output_file = tmp_path / "out" / "photo.svg"
+    captured = {}
+
+    def fake_check_call(cmd, stdout, stderr):
+        captured["ffmpeg_cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"png")
+        return 0
+
+    def fake_convert(input_path, output_path):
+        captured["vtracer_input"] = input_path
+        Path(output_path).write_text("<svg />", encoding="utf-8")
+
+    monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
+    monkeypatch.setitem(sys.modules, "vtracer", types.SimpleNamespace(convert_image_to_svg_py=fake_convert))
+
+    worker._run_image_vectorization(str(input_file), str(output_file))
+
+    assert captured["ffmpeg_cmd"][:4] == ["ffmpeg", "-y", "-i", str(input_file)]
+    assert captured["vtracer_input"].endswith("vector-source.png")
+    assert output_file.read_text(encoding="utf-8") == "<svg />"
+
+
+def test_run_svg_to_image_conversion_renders_before_media_command(monkeypatch, tmp_path):
+    input_file = tmp_path / "icon.svg"
+    input_file.write_text("<svg />", encoding="utf-8")
+    output_file = tmp_path / "out" / "icon.png"
+    captured = {}
+
+    def fake_run(cmd, check, stdout, stderr, timeout):
+        captured["rsvg_cmd"] = cmd
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"png")
+        return types.SimpleNamespace(returncode=0)
+
+    def fake_check_call(cmd, stdout, stderr):
+        captured["ffmpeg_cmd"] = cmd
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(b"out")
+        return 0
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
+    monkeypatch.setattr(worker, "_validate_media_command_encoders", lambda cmd: None)
+
+    worker._run_svg_to_image_conversion(str(input_file), str(output_file), "png", "balanced", True, {})
+
+    assert captured["rsvg_cmd"][0] == "rsvg-convert"
+    assert captured["ffmpeg_cmd"][:3] == ["ffmpeg", "-y", "-i"]
+    assert output_file.read_bytes() == b"out"
+
+
+def test_run_pdf_to_image_zip_creates_stable_jpg_entries(monkeypatch, tmp_path):
+    input_file = tmp_path / "scan.pdf"
+    input_file.write_bytes(b"pdf")
+    output_file = tmp_path / "scan-jpg.zip"
+
+    def fake_run(cmd, check, stdout, stderr, timeout):
+        prefix = Path(cmd[-1])
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        (prefix.parent / f"{prefix.name}-1.jpg").write_bytes(b"page-1")
+        (prefix.parent / f"{prefix.name}-2.jpg").write_bytes(b"page-2")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    worker._run_pdf_to_image_zip(str(input_file), str(output_file), "jpg", "balanced", True, {}, stem="scan")
+
+    with zipfile.ZipFile(output_file) as archive:
+        assert archive.namelist() == ["scan-page-001.jpg", "scan-page-002.jpg"]
+        assert archive.read("scan-page-001.jpg") == b"page-1"
+
+
+def test_run_pdf_to_image_zip_always_zips_single_page(monkeypatch, tmp_path):
+    input_file = tmp_path / "one.pdf"
+    input_file.write_bytes(b"pdf")
+    output_file = tmp_path / "one-png.zip"
+
+    def fake_run(cmd, check, stdout, stderr, timeout):
+        prefix = Path(cmd[-1])
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        (prefix.parent / f"{prefix.name}-1.png").write_bytes(b"page-1")
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    worker._run_pdf_to_image_zip(str(input_file), str(output_file), "png", "balanced", True, {}, stem="one")
+
+    assert output_file.suffix == ".zip"
+    with zipfile.ZipFile(output_file) as archive:
+        assert archive.namelist() == ["one-page-001.png"]
 
 
 def test_download_progress_hook_maps_known_and_unknown_totals():

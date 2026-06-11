@@ -12,6 +12,7 @@ import glob
 import json
 import re
 import tempfile
+import zipfile
 from apps.api.app.compression_goals import resolve_compression_family, get_compression_profile
 from apps.api.app.models import Flow, FlowRun, Job
 
@@ -30,7 +31,9 @@ DEFAULT_FORMATS = {
     "pdf": "pdf",
     "text": "txt",
 }
-IMAGE_FORMATS = {"webp", "jpg", "jpeg", "png", "avif", "gif", "bmp", "tiff", "tif"}
+IMAGE_FORMAT_ALIASES = {"jpeg": "jpg", "tif": "tiff"}
+CANONICAL_IMAGE_FORMATS = {"webp", "jpg", "png", "avif", "gif", "bmp", "tiff", "ico", "svg"}
+IMAGE_FORMATS = CANONICAL_IMAGE_FORMATS | set(IMAGE_FORMAT_ALIASES.keys())
 DOCUMENT_FORMATS = {"docx", "doc", "odt", "rtf", "txt", "html", "pdf"}
 SPREADSHEET_FORMATS = {"xlsx", "xls", "ods", "csv", "html", "pdf"}
 PRESENTATION_FORMATS = {"pptx", "ppt", "odp", "html", "pdf"}
@@ -197,6 +200,13 @@ def _profile_output_ext(family: str | None, profile: dict) -> str:
 def _clean_choice(value: str | None, allowed: set[str], fallback: str) -> str:
     cleaned = str(value or fallback).lower().lstrip(".")
     return cleaned if cleaned in allowed else fallback
+
+
+def _normalize_output_format(family: str | None, output_format: str) -> str:
+    normalized = str(output_format or "").lower().lstrip(".")
+    if family == "image":
+        return IMAGE_FORMAT_ALIASES.get(normalized, normalized)
+    return normalized
 
 
 def _quality_preset(input_obj: dict) -> str:
@@ -538,6 +548,157 @@ def _run_document_conversion(input_path: str, output_path: str, family: str, out
         shutil.move(candidates[0], output_path)
 
 
+def _run_image_to_pdf_conversion(input_path: str, output_path: str):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    source_ext = _source_extension(input_path)
+    if source_ext == "svg":
+        subprocess.run(
+            ["rsvg-convert", "-f", "pdf", "-o", output_path, input_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_document_timeout(),
+        )
+        return
+
+    try:
+        import img2pdf
+    except Exception as exc:
+        raise RuntimeError("img2pdf is required for image-to-PDF conversion") from exc
+
+    pdf_input = input_path
+    temp_dir = None
+    if source_ext not in {"jpg", "jpeg", "png", "jp2", "j2k", "tiff", "tif"}:
+        temp_dir = tempfile.TemporaryDirectory()
+        pdf_input = os.path.join(temp_dir.name, "image.png")
+        subprocess.check_call(
+            ["ffmpeg", "-y", "-i", input_path, "-frames:v", "1", pdf_input],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    try:
+        with open(output_path, "wb") as target:
+            target.write(img2pdf.convert(pdf_input))
+    finally:
+        if temp_dir:
+            temp_dir.cleanup()
+
+
+def _run_svg_to_image_conversion(input_path: str, output_path: str, output_format: str, quality: str, strip_metadata: bool, options: dict):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raster_input = os.path.join(tmpdir, "svg-source.png")
+        subprocess.run(
+            ["rsvg-convert", "-f", "png", "-o", raster_input, input_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_document_timeout(),
+        )
+        cmd = _build_media_command(raster_input, output_path, "image", output_format, quality, strip_metadata, options)
+        _validate_media_command_encoders(cmd)
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _run_image_vectorization(input_path: str, output_path: str):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    source_ext = _source_extension(input_path)
+    if source_ext == "svg":
+        shutil.copyfile(input_path, output_path)
+        return
+    try:
+        import vtracer
+    except Exception as exc:
+        raise RuntimeError("vtracer is required for SVG vectorization") from exc
+
+    vector_input = input_path
+    temp_dir = None
+    if source_ext not in {"jpg", "jpeg", "png"}:
+        temp_dir = tempfile.TemporaryDirectory()
+        vector_input = os.path.join(temp_dir.name, "vector-source.png")
+        subprocess.check_call(
+            ["ffmpeg", "-y", "-i", input_path, "-frames:v", "1", vector_input],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    try:
+        vtracer.convert_image_to_svg_py(vector_input, output_path)
+    finally:
+        if temp_dir:
+            temp_dir.cleanup()
+
+
+def _pdftoppm_format_args(output_format: str, quality: str) -> tuple[list[str], str]:
+    if output_format == "jpg":
+        image_quality = IMAGE_QUALITY[quality]["quality"]
+        return ["-jpeg", "-jpegopt", f"quality={image_quality},optimize=y"], "jpg"
+    if output_format == "png":
+        return ["-png"], "png"
+    if output_format == "tiff":
+        return ["-tiff", "-tiffcompression", "deflate"], "tiff"
+    return ["-png"], "png"
+
+
+def _page_sort_key(path: str) -> tuple[int, str]:
+    match = re.search(r"-(\d+)\.[^.]+$", os.path.basename(path))
+    return (int(match.group(1)) if match else 0, path)
+
+
+def _render_pdf_pages(input_path: str, output_dir: str, output_format: str, quality: str) -> list[str]:
+    os.makedirs(output_dir, exist_ok=True)
+    args, _ = _pdftoppm_format_args(output_format, quality)
+    prefix = os.path.join(output_dir, "page")
+    subprocess.run(
+        ["pdftoppm", "-r", "150", *args, input_path, prefix],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=_document_timeout(),
+    )
+    rendered = sorted(glob.glob(os.path.join(output_dir, "page-*.*")), key=_page_sort_key)
+    if not rendered:
+        raise RuntimeError("PDF conversion produced no page images")
+    return rendered
+
+
+def _zip_outputs(files: list[str], output_path: str, stem: str, output_format: str):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, filename in enumerate(files, start=1):
+            archive.write(filename, f"{stem}-page-{index:03d}.{output_format}")
+
+
+def _run_pdf_to_image_zip(
+    input_path: str,
+    output_path: str,
+    output_format: str,
+    quality: str,
+    strip_metadata: bool,
+    options: dict | None = None,
+    stem: str | None = None,
+):
+    output_format = _normalize_output_format("image", output_format)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        page_dir = os.path.join(tmpdir, "pages")
+        if output_format in {"jpg", "png", "tiff"}:
+            converted = _render_pdf_pages(input_path, page_dir, output_format, quality)
+        else:
+            rendered = _render_pdf_pages(input_path, page_dir, "png", quality)
+            converted = []
+            for index, page_path in enumerate(rendered, start=1):
+                page_output = os.path.join(tmpdir, f"converted-{index:03d}.{output_format}")
+                if output_format == "svg":
+                    _run_image_vectorization(page_path, page_output)
+                else:
+                    cmd = _build_media_command(page_path, page_output, "image", output_format, quality, strip_metadata, options)
+                    _validate_media_command_encoders(cmd)
+                    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                converted.append(page_output)
+
+        zip_stem = stem or _safe_stem(input_path, "pdf")
+        _zip_outputs(converted, output_path, zip_stem, output_format)
+
+
 def _build_media_command(
     input_path: str,
     output_path: str,
@@ -548,6 +709,7 @@ def _build_media_command(
     options: dict | None = None,
 ):
     options = options or {}
+    output_format = _normalize_output_format(family, output_format)
     cmd = ["ffmpeg", "-y", "-i", input_path]
 
     if family == "audio":
@@ -612,6 +774,9 @@ def _build_media_command(
         cmd += ["-frames:v", "1"]
         max_width = _int_option(options.get("max_width"), settings.get("max_width"), minimum=16, maximum=20000)
         max_height = _int_option(options.get("max_height"), max_width, minimum=16, maximum=20000) if max_width else None
+        if output_format == "ico":
+            max_width = min(max_width or 256, 256)
+            max_height = min(max_height or max_width, 256)
         if max_width and max_height:
             cmd += [
                 "-vf",
@@ -927,7 +1092,7 @@ def process_convert(self, job_id: int):
             elif source_family == "audio":
                 allowed_output_families = {"audio"}
             elif source_family == "image":
-                allowed_output_families = {"image"}
+                allowed_output_families = {"image", "pdf"}
             elif source_family == "document":
                 allowed_output_families = {"document", "pdf", "text"}
             elif source_family == "spreadsheet":
@@ -935,7 +1100,7 @@ def process_convert(self, job_id: int):
             elif source_family == "presentation":
                 allowed_output_families = {"presentation", "pdf"}
             elif source_family == "pdf":
-                allowed_output_families = {"pdf", "text"}
+                allowed_output_families = {"pdf", "text", "image"}
             elif source_family == "text":
                 allowed_output_families = {"text", "document", "pdf"}
             else:
@@ -951,17 +1116,33 @@ def process_convert(self, job_id: int):
                 ),
                 DEFAULT_FORMATS.get(family, "mp3"),
             )
+            output_format = _normalize_output_format(family, output_format)
             strip_metadata = bool(input_obj.get("strip_metadata", True))
 
             stem = _safe_stem(original_name, f"job-{job_id}")
-            outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{output_format}")
+            output_ext = "zip" if source_family == "pdf" and family == "image" else output_format
+            outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{output_ext}")
 
             _log(job_id, f"Starting local conversion: {input_path}")
             _log(job_id, f"Output decision: source_family={source_family} family={family} format={output_format} quality={quality}")
             _set_job_progress(session, job, 35, "Konvertierung laeuft", force=True)
 
             try:
-                if family in DOCUMENT_FAMILIES:
+                if source_family == "image" and family == "pdf":
+                    if output_format != "pdf":
+                        raise RuntimeError("Images can only be converted to PDF in the pdf family")
+                    _run_image_to_pdf_conversion(input_path, outpath)
+                    _set_job_progress(session, job, 95, "PDF erstellt", force=True)
+                elif source_family == "pdf" and family == "image":
+                    _run_pdf_to_image_zip(input_path, outpath, output_format, quality, strip_metadata, input_obj, stem=stem)
+                    _set_job_progress(session, job, 95, "PDF-Seiten konvertiert", force=True)
+                elif family == "image" and output_format == "svg":
+                    _run_image_vectorization(input_path, outpath)
+                    _set_job_progress(session, job, 95, "SVG erstellt", force=True)
+                elif source_family == "image" and _source_extension(input_path) == "svg" and family == "image":
+                    _run_svg_to_image_conversion(input_path, outpath, output_format, quality, strip_metadata, input_obj)
+                    _set_job_progress(session, job, 95, "SVG gerendert", force=True)
+                elif family in DOCUMENT_FAMILIES:
                     _run_document_conversion(input_path, outpath, family, output_format)
                     _set_job_progress(session, job, 95, "Dokument konvertiert", force=True)
                 else:

@@ -109,12 +109,12 @@ def test_normalizers_accept_extended_output_formats():
         file=fake_upload("photo.tif", b"image", content_type="image/tiff"),
         compression_family="image",
         compression_profile="balanced",
-        output_format="avif",
+        output_format="jpeg",
         quality_preset="balanced",
         strip_metadata=True,
     )
     assert image["source_family"] == "image"
-    assert image["output_format"] == "avif"
+    assert image["output_format"] == "jpg"
 
     document = api_main.normalize_convert_options(
         file=fake_upload(
@@ -131,6 +131,30 @@ def test_normalizers_accept_extended_output_formats():
     assert document["source_family"] == "document"
     assert document["family"] == "pdf"
     assert document["output_format"] == "pdf"
+
+    image_pdf = api_main.normalize_convert_options(
+        file=fake_upload("photo.jpg", b"image", content_type="image/jpeg"),
+        compression_family="pdf",
+        compression_profile="balanced",
+        output_format="pdf",
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    assert image_pdf["source_family"] == "image"
+    assert image_pdf["family"] == "pdf"
+    assert image_pdf["output_format"] == "pdf"
+
+    pdf_image = api_main.normalize_convert_options(
+        file=fake_upload("scan.pdf", b"pdf", content_type="application/pdf"),
+        compression_family="image",
+        compression_profile="balanced",
+        output_format="tif",
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    assert pdf_image["source_family"] == "pdf"
+    assert pdf_image["family"] == "image"
+    assert pdf_image["output_format"] == "tiff"
 
 
 def test_store_upload_file_removes_partial_file_when_too_large(tmp_path):
@@ -184,6 +208,21 @@ def test_convert_options_reject_image_to_video():
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "Cannot convert image to video"
+
+
+def test_convert_options_reject_image_to_pdf_text_format():
+    with pytest.raises(HTTPException) as exc:
+        api_main.normalize_convert_options(
+            file=fake_upload("photo.jpg", b"image", content_type="image/jpeg"),
+            compression_family="pdf",
+            compression_profile="balanced",
+            output_format="txt",
+            quality_preset="balanced",
+            strip_metadata=True,
+        )
+
+    assert exc.value.status_code == 400
+    assert "Unsupported image to PDF conversion format" in exc.value.detail
 
 
 def test_convert_options_allow_video_to_audio():

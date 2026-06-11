@@ -56,7 +56,7 @@
     "image": {
       "description": "Image compression profiles for storage and web previews.",
       "mime_prefixes": ["image/"],
-      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff", "tif", "heic", "heif"],
+      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff", "tif", "ico", "svg", "heic", "heif"],
       "profiles": {
         "balanced": {
           "target": "Keep visual quality while shrinking file size.",

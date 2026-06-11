@@ -32,7 +32,7 @@ mp4, webm, mkv, mov, m4v, avi, mpg, mpeg, flv, wmv, ogv, ts, vob
 Image:
 
 ```text
-webp, jpg, jpeg, png, avif, gif, bmp, tiff, tif
+webp, jpg, png, avif, gif, bmp, tiff, ico, svg
 ```
 
 Documents:
@@ -60,6 +60,8 @@ pdf, txt, html
 ```
 
 HEIC/HEIF files are recognized as image inputs when possible, but they are not offered as target formats unless the ffmpeg build reliably supports writing them.
+JPEG and TIF are accepted as input/output aliases for JPG and TIFF, but the UI shows only the canonical names.
+PDF files can be exported to image formats as a ZIP with one image per page; images can also be wrapped into PDF.
 
 ## Requirements
 
