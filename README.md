@@ -4,7 +4,7 @@ MediaForge is a self-hosted media download and conversion hub for a NAS, home se
 
 It provides a FastAPI backend, a Celery/Redis worker pipeline, ffmpeg-based media conversion and a React frontend served by the API container.
 
-Committed logo assets live in `apps/frontend/public/`: `logo.png` is the transparent full source logo and `logo-mark.png` is the transparent cropped icon used for the header brand mark, media fallback thumbnail and browser tab icon.
+The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it as `/logo.png`, and the frontend uses the same transparent logo for the header brand mark, media fallback thumbnail and browser tab icon.
 
 ## Features
 
@@ -22,25 +22,25 @@ Committed logo assets live in `apps/frontend/public/`: `logo.png` is the transpa
 Audio:
 
 ```text
-mp3, m4a, aac, opus, ogg, oga, wav, flac, aiff, alac, wma
+mp3, m4a, aac, opus, ogg, oga, weba, mka, wav, flac, aiff, alac, wma
 ```
 
 Video:
 
 ```text
-mp4, webm, mkv, mov, m4v, avi, mpg, mpeg, flv, wmv, ogv, ts, vob
+mp4, webm, mkv, mov, m4v, avi, mpg, mpeg, flv, wmv, ogv, ts, m2ts, mts, vob, 3gp, 3g2
 ```
 
 Image:
 
 ```text
-webp, jpg, png, avif, gif, bmp, tiff, ico, svg
+webp, jpg, png, avif, gif, bmp, tiff, ico, svg, jp2, tga
 ```
 
 Documents:
 
 ```text
-docx, doc, odt, rtf, txt, html, pdf
+docx, doc, odt, rtf, txt, html, pdf, epub
 ```
 
 Spreadsheets:
@@ -61,8 +61,10 @@ PDF/Text:
 pdf, txt, html
 ```
 
+Additional common input-only extensions are recognized for conversion, including Office macro/template files (`docm`, `dotx`, `xlsm`, `ppsx`), AVCHD/mobile video (`mts`, `m2ts`, `3gp`, `3g2`), JPEG 2000 aliases (`j2k`, `jpf`, `jpx`) and common text sources (`md`, `json`, `xml`, `yaml`).
 HEIC/HEIF files are recognized as image inputs when possible, but they are not offered as target formats unless the ffmpeg build reliably supports writing them.
-JPEG and TIF are accepted as input/output aliases for JPG and TIFF, but the UI shows only the canonical names.
+JPEG, TIF, AIF and JPEG 2000 aliases are accepted as input/output aliases for their canonical target formats, but the UI shows only the canonical names.
+Unsupported project or editor-native files, such as Photoshop `psd` files, are rejected before upload with a compatibility message.
 PDF files can be exported to image formats as a ZIP with one image per page; images can also be wrapped into PDF.
 
 ## Requirements
@@ -191,7 +193,7 @@ Before publishing a GitHub release:
 - Run backend and worker tests.
 - Run frontend typecheck/build and Playwright tests.
 - Confirm `.env` is not committed.
-- Confirm `apps/frontend/public/logo.png` and `apps/frontend/public/logo-mark.png` exist and no duplicate root-level logo files or preview scratch files are staged.
+- Confirm `apps/frontend/public/logo.png` exists and no duplicate root-level logo files or preview scratch files are staged.
 - Confirm `/data/`, SQLite databases, logs, generated media, `node_modules/`, `dist/`, Playwright reports, TypeScript cache files and virtual environments are ignored.
 - Build the Docker images from a clean checkout.
 - Start the stack and verify `/health`, the frontend, one download job and one upload conversion.
@@ -201,7 +203,7 @@ Before publishing a GitHub release:
 Commit:
 
 - source code under `apps/`
-- frontend public assets, including `apps/frontend/public/logo.png` and `apps/frontend/public/logo-mark.png`
+- frontend public assets, including `apps/frontend/public/logo.png`
 - Docker files under `docker/` and app Dockerfiles
 - tests and documentation
 - `.env.example`

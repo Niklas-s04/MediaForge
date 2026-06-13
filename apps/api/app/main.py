@@ -30,27 +30,41 @@ logger = logging.getLogger(__name__)
 
 
 DOWNLOAD_FORMATS = {
-    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "aiff", "alac", "wma"},
-    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"},
+    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "weba", "mka", "wav", "flac", "aiff", "alac", "wma"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "m2ts", "mts", "vob", "3gp", "3g2"},
 }
 CONVERT_FORMATS = {
-    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "aiff", "alac", "wma"},
-    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"},
-    "image": {"webp", "jpg", "png", "avif", "gif", "bmp", "tiff", "ico", "svg"},
-    "document": {"docx", "doc", "odt", "rtf", "txt", "html", "pdf"},
+    "audio": {"mp3", "m4a", "aac", "opus", "ogg", "oga", "weba", "mka", "wav", "flac", "aiff", "alac", "wma"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "m2ts", "mts", "vob", "3gp", "3g2"},
+    "image": {"webp", "jpg", "png", "avif", "gif", "bmp", "tiff", "ico", "svg", "jp2", "tga"},
+    "document": {"docx", "doc", "odt", "rtf", "txt", "html", "pdf", "epub"},
     "spreadsheet": {"xlsx", "xls", "ods", "csv", "html", "pdf"},
     "presentation": {"pptx", "ppt", "odp", "html", "pdf"},
     "pdf": {"pdf", "txt"},
     "text": {"txt", "html", "pdf", "docx", "odt", "rtf"},
 }
 FORMAT_ALIASES = {
+    "audio": {
+        "aif": "aiff",
+    },
     "image": {
         "jpeg": "jpg",
         "tif": "tiff",
+        "j2k": "jp2",
+        "jpf": "jp2",
+        "jpx": "jp2",
+    },
+    "document": {
+        "htm": "html",
+    },
+    "text": {
+        "htm": "html",
+        "markdown": "md",
     },
 }
 QUALITY_PRESETS = {"high", "balanced", "small"}
 DOWNLOAD_QUALITIES = {"best", "1080p", "720p", "480p", "360p"}
+UPLOAD_INCOMPATIBLE_DETAIL = "Die Datei ist nicht kompatibel."
 _cleanup_thread_started = False
 
 
@@ -254,6 +268,20 @@ def safe_upload_filename(filename: str | None) -> str:
     return cleaned.strip("._") or "upload.bin"
 
 
+def upload_extension(filename: str | None) -> str | None:
+    ext = os.path.splitext(filename or "")[1].lower().lstrip(".")
+    return ext or None
+
+
+def supported_upload_extensions() -> set[str]:
+    goals = load_compression_goals()
+    extensions: set[str] = set()
+    for family_name, family in goals.get("families", {}).items():
+        if family_name in CONVERT_FORMATS:
+            extensions.update(str(ext).lower().lstrip(".") for ext in family.get("extensions", []))
+    return {ext for ext in extensions if ext}
+
+
 def store_upload_file(file: UploadFile, upload_dir: str, max_bytes: int) -> str:
     os.makedirs(upload_dir, exist_ok=True)
     filename = f"{uuid.uuid4().hex}-{safe_upload_filename(file.filename)}"
@@ -318,15 +346,18 @@ def quality_to_warning_profile(quality_preset: str | None) -> str:
 
 
 def infer_family_from_upload(file: UploadFile, fallback: str | None = None) -> str:
-    family = resolve_compression_family(
-        mime_type=file.content_type,
-        file_name_or_ext=file.filename,
-    )
+    ext = upload_extension(file.filename)
+    if ext:
+        if ext not in supported_upload_extensions():
+            raise HTTPException(status_code=415, detail=UPLOAD_INCOMPATIBLE_DETAIL)
+        family = resolve_compression_family(mime_type=None, file_name_or_ext=ext)
+        if family in CONVERT_FORMATS:
+            return family
+
+    family = resolve_compression_family(mime_type=file.content_type, file_name_or_ext=None)
     if family in CONVERT_FORMATS:
         return family
-    if fallback in CONVERT_FORMATS:
-        return fallback
-    raise HTTPException(status_code=400, detail="Unsupported media type")
+    raise HTTPException(status_code=415, detail=UPLOAD_INCOMPATIBLE_DETAIL)
 
 
 def normalize_download_input(input_obj: dict) -> dict:
@@ -564,11 +595,6 @@ def frontend_static_file(filename: str, media_type: str):
 @app.get("/logo.png", include_in_schema=False)
 def full_logo():
     return frontend_static_file("logo.png", "image/png")
-
-
-@app.get("/logo-mark.png", include_in_schema=False)
-def logo_mark():
-    return frontend_static_file("logo-mark.png", "image/png")
 
 
 @app.get("/")

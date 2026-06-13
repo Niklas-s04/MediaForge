@@ -192,6 +192,12 @@ def test_build_media_command_supports_extended_formats():
     wma_cmd = worker._build_media_command("in.wav", "out.wma", "audio", "wma", "balanced", True, {})
     assert "wmav2" in wma_cmd
 
+    weba_cmd = worker._build_media_command("in.wav", "out.weba", "audio", "weba", "balanced", True, {})
+    assert "libopus" in weba_cmd
+
+    mka_cmd = worker._build_media_command("in.wav", "out.mka", "audio", "mka", "balanced", True, {})
+    assert "libopus" in mka_cmd
+
     avi_cmd = worker._build_media_command("in.mp4", "out.avi", "video", "avi", "balanced", True, {})
     assert "mpeg4" in avi_cmd
     assert "libmp3lame" in avi_cmd
@@ -208,12 +214,26 @@ def test_build_media_command_supports_extended_formats():
     assert "mpeg2video" in ts_cmd
     assert "mp2" in ts_cmd
 
+    m2ts_cmd = worker._build_media_command("in.mp4", "out.m2ts", "video", "m2ts", "balanced", True, {})
+    assert "mpeg2video" in m2ts_cmd
+    assert "mp2" in m2ts_cmd
+
+    gp3_cmd = worker._build_media_command("in.mp4", "out.3gp", "video", "3gp", "balanced", True, {})
+    assert "mpeg4" in gp3_cmd
+    assert "aac" in gp3_cmd
+
     avif_cmd = worker._build_media_command("in.png", "out.avif", "image", "avif", "balanced", True, {})
     assert "libaom-av1" in avif_cmd
 
     ico_cmd = worker._build_media_command("in.png", "out.ico", "image", "ico", "balanced", True, {})
     assert ico_cmd[-1] == "out.ico"
     assert "min(256,iw)" in " ".join(ico_cmd)
+
+    jp2_cmd = worker._build_media_command("in.png", "out.jp2", "image", "jp2", "balanced", True, {})
+    assert jp2_cmd[-1] == "out.jp2"
+
+    tga_cmd = worker._build_media_command("in.png", "out.tga", "image", "tga", "balanced", True, {})
+    assert tga_cmd[-1] == "out.tga"
 
 
 def test_build_media_command_accepts_added_codec_options():

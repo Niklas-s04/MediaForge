@@ -99,26 +99,37 @@ def test_normalizers_accept_extended_output_formats():
         {
             "url": "https://example.invalid/video",
             "output_kind": "video",
-            "output_format": "mov",
+            "output_format": "3gp",
             "quality_preset": "balanced",
         }
     )
-    assert download["output_format"] == "mov"
+    assert download["output_format"] == "3gp"
+
+    audio = api_main.normalize_convert_options(
+        file=fake_upload("track.weba", b"audio", content_type="audio/webm"),
+        compression_family="audio",
+        compression_profile="balanced",
+        output_format="mka",
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    assert audio["source_family"] == "audio"
+    assert audio["output_format"] == "mka"
 
     image = api_main.normalize_convert_options(
-        file=fake_upload("photo.tif", b"image", content_type="image/tiff"),
+        file=fake_upload("photo.j2k", b"image", content_type="image/jp2"),
         compression_family="image",
         compression_profile="balanced",
-        output_format="jpeg",
+        output_format="tga",
         quality_preset="balanced",
         strip_metadata=True,
     )
     assert image["source_family"] == "image"
-    assert image["output_format"] == "jpg"
+    assert image["output_format"] == "tga"
 
     document = api_main.normalize_convert_options(
         file=fake_upload(
-            "report.docx",
+            "report.docm",
             b"doc",
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ),
@@ -155,6 +166,32 @@ def test_normalizers_accept_extended_output_formats():
     assert pdf_image["source_family"] == "pdf"
     assert pdf_image["family"] == "image"
     assert pdf_image["output_format"] == "tiff"
+
+    ebook = api_main.normalize_convert_options(
+        file=fake_upload("report.dotx", b"doc", content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.template"),
+        compression_family="document",
+        compression_profile="balanced",
+        output_format="epub",
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    assert ebook["source_family"] == "document"
+    assert ebook["output_format"] == "epub"
+
+
+def test_upload_rejects_incompatible_photoshop_file():
+    with pytest.raises(HTTPException) as exc:
+        api_main.normalize_convert_options(
+            file=fake_upload("design.psd", b"photoshop", content_type="image/vnd.adobe.photoshop"),
+            compression_family="image",
+            compression_profile="balanced",
+            output_format="webp",
+            quality_preset="balanced",
+            strip_metadata=True,
+        )
+
+    assert exc.value.status_code == 415
+    assert exc.value.detail == "Die Datei ist nicht kompatibel."
 
 
 def test_store_upload_file_removes_partial_file_when_too_large(tmp_path):

@@ -31,10 +31,10 @@ DEFAULT_FORMATS = {
     "pdf": "pdf",
     "text": "txt",
 }
-IMAGE_FORMAT_ALIASES = {"jpeg": "jpg", "tif": "tiff"}
-CANONICAL_IMAGE_FORMATS = {"webp", "jpg", "png", "avif", "gif", "bmp", "tiff", "ico", "svg"}
+IMAGE_FORMAT_ALIASES = {"jpeg": "jpg", "tif": "tiff", "j2k": "jp2", "jpf": "jp2", "jpx": "jp2"}
+CANONICAL_IMAGE_FORMATS = {"webp", "jpg", "png", "avif", "gif", "bmp", "tiff", "ico", "svg", "jp2", "tga"}
 IMAGE_FORMATS = CANONICAL_IMAGE_FORMATS | set(IMAGE_FORMAT_ALIASES.keys())
-DOCUMENT_FORMATS = {"docx", "doc", "odt", "rtf", "txt", "html", "pdf"}
+DOCUMENT_FORMATS = {"docx", "doc", "odt", "rtf", "txt", "html", "pdf", "epub"}
 SPREADSHEET_FORMATS = {"xlsx", "xls", "ods", "csv", "html", "pdf"}
 PRESENTATION_FORMATS = {"pptx", "ppt", "odp", "html", "pdf"}
 PDF_FORMATS = {"pdf", "txt"}
@@ -71,6 +71,8 @@ FORMAT_CODECS = {
         "ogg": {"codec": "libvorbis", "bitrate": {"high": "224k", "balanced": "160k", "small": "96k"}},
         "oga": {"codec": "libvorbis", "bitrate": {"high": "224k", "balanced": "160k", "small": "96k"}},
         "opus": {"codec": "libopus", "bitrate": {"high": "192k", "balanced": "128k", "small": "80k"}},
+        "weba": {"codec": "libopus", "bitrate": {"high": "192k", "balanced": "128k", "small": "80k"}},
+        "mka": {"codec": "libopus", "bitrate": {"high": "192k", "balanced": "128k", "small": "80k"}},
         "wav": {"codec": "pcm_s16le"},
         "flac": {"codec": "flac"},
         "aiff": {"codec": "pcm_s16be"},
@@ -90,7 +92,11 @@ FORMAT_CODECS = {
         "wmv": {"video_codec": "msmpeg4v3", "audio_codec": "wmav2"},
         "ogv": {"video_codec": "libvpx", "audio_codec": "libvorbis"},
         "ts": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
+        "m2ts": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
+        "mts": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
         "vob": {"video_codec": "mpeg2video", "audio_codec": "mp2"},
+        "3gp": {"video_codec": "mpeg4", "audio_codec": "aac"},
+        "3g2": {"video_codec": "mpeg4", "audio_codec": "aac"},
     },
 }
 _PROGRESS_WRITE_STATE: dict[int, dict[str, float | int]] = {}
@@ -746,11 +752,11 @@ def _build_media_command(
         cmd += ["-c:v", video_codec, "-c:a", audio_codec]
         if video_codec in CRF_VIDEO_CODECS:
             cmd += ["-crf", str(crf)]
-        elif output_format not in {"mpg", "mpeg", "ts", "vob"}:
+        elif output_format not in {"mpg", "mpeg", "ts", "m2ts", "mts", "vob"}:
             cmd += ["-q:v", LEGACY_VIDEO_QSCALE[quality]]
         if video_codec in {"libvpx", "libvpx-vp9"}:
             cmd += ["-b:v", "0"]
-        elif output_format in {"mpg", "mpeg", "ts", "vob"}:
+        elif output_format in {"mpg", "mpeg", "ts", "m2ts", "mts", "vob"}:
             cmd += ["-q:v", "4"]
         elif video_codec in {"libx264", "libx265"}:
             cmd += ["-preset", "medium"]

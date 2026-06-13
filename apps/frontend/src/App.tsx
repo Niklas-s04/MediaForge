@@ -1,7 +1,7 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Modal from './Modal'
 
-const LOGO_MARK_SRC = '/logo-mark.png'
+const LOGO_SRC = '/logo.png'
 
 type Job = {
   id: number
@@ -86,7 +86,11 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'video', value: 'wmv', label: 'WMV', text: 'Windows-Media-Container für Legacy-Geräte' },
     { family: 'video', value: 'ogv', label: 'OGV', text: 'Offenes Ogg-Videoformat' },
     { family: 'video', value: 'ts', label: 'TS', text: 'MPEG-Transportstream für Broadcasts' },
+    { family: 'video', value: 'm2ts', label: 'M2TS', text: 'Transportstream für AVCHD und Blu-ray' },
+    { family: 'video', value: 'mts', label: 'MTS', text: 'AVCHD-Kamera-Container' },
     { family: 'video', value: 'vob', label: 'VOB', text: 'DVD-kompatibler MPEG-Container' },
+    { family: 'video', value: '3gp', label: '3GP', text: 'Mobiler Video-Container' },
+    { family: 'video', value: '3g2', label: '3G2', text: '3GPP2-Video-Container' },
   ],
   audio: [
     { family: 'audio', value: 'mp3', label: 'MP3', text: 'Maximale Kompatibilität' },
@@ -94,6 +98,8 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'audio', value: 'aac', label: 'AAC', text: 'Effizient für Web, Handy und Streaming' },
     { family: 'audio', value: 'ogg', label: 'OGG', text: 'Offen und gut für Web-Audio' },
     { family: 'audio', value: 'opus', label: 'Opus', text: 'Sehr effizient für Sprache und Musik' },
+    { family: 'audio', value: 'weba', label: 'WebA', text: 'WebM-Audio mit Opus-Codec' },
+    { family: 'audio', value: 'mka', label: 'MKA', text: 'Matroska-Audio-Container' },
     { family: 'audio', value: 'wav', label: 'WAV', text: 'Unkomprimiert für Schnittprogramme' },
     { family: 'audio', value: 'flac', label: 'FLAC', text: 'Verlustfrei komprimiert' },
     { family: 'audio', value: 'aiff', label: 'AIFF', text: 'Unkomprimiert für Audio-Workstations' },
@@ -111,6 +117,8 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'image', value: 'tiff', label: 'TIFF', text: 'Druck, Scan und Archiv' },
     { family: 'image', value: 'ico', label: 'ICO', text: 'Icon-Datei für Apps und Websites' },
     { family: 'image', value: 'svg', label: 'SVG', text: 'Vektorisierte Grafik für Skalierung' },
+    { family: 'image', value: 'jp2', label: 'JP2', text: 'JPEG-2000-Bilddatei' },
+    { family: 'image', value: 'tga', label: 'TGA', text: 'Targa-Grafik für 3D- und Video-Workflows' },
   ],
   document: [
     { family: 'document', value: 'docx', label: 'DOCX', text: 'Modernes Word-Dokument' },
@@ -120,6 +128,7 @@ const formatCatalog: Record<MediaFamily, FormatDef[]> = {
     { family: 'document', value: 'txt', label: 'TXT', text: 'Einfacher Text' },
     { family: 'document', value: 'html', label: 'HTML', text: 'Web-/Archivansicht' },
     { family: 'document', value: 'pdf', label: 'PDF', text: 'Dokument als PDF exportieren' },
+    { family: 'document', value: 'epub', label: 'EPUB', text: 'E-Book-Format für Reader' },
   ],
   spreadsheet: [
     { family: 'spreadsheet', value: 'xlsx', label: 'XLSX', text: 'Moderne Excel-Arbeitsmappe' },
@@ -162,6 +171,19 @@ const familyLabels: Record<MediaFamily, string> = {
 }
 
 const mediaFamilies: MediaFamily[] = ['video', 'audio', 'image', 'document', 'spreadsheet', 'presentation', 'pdf', 'text']
+
+const uploadExtensions: Record<MediaFamily, string[]> = {
+  audio: ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus', 'weba', 'mka', 'aiff', 'aif', 'alac', 'wma'],
+  video: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'mpg', 'mpeg', 'flv', 'wmv', 'ogv', 'ts', 'm2ts', 'mts', 'vob', '3gp', '3g2'],
+  image: ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif', 'ico', 'svg', 'heic', 'heif', 'jp2', 'j2k', 'jpf', 'jpx', 'tga'],
+  document: ['docx', 'doc', 'docm', 'dot', 'dotx', 'dotm', 'odt', 'rtf', 'html', 'htm', 'mht', 'mhtml'],
+  spreadsheet: ['xlsx', 'xls', 'xlsm', 'xlt', 'xltx', 'xltm', 'ods', 'csv', 'tsv'],
+  presentation: ['pptx', 'ppt', 'pptm', 'pps', 'ppsx', 'ppsm', 'pot', 'potx', 'potm', 'odp'],
+  pdf: ['pdf'],
+  text: ['txt', 'md', 'markdown', 'log', 'json', 'xml', 'yaml', 'yml'],
+}
+
+const uploadAccept = mediaFamilies.flatMap((family) => uploadExtensions[family].map((ext) => `.${ext}`)).join(',')
 
 const qualityOptions: { value: QualityPreset; label: string; text: string }[] = [
   { value: 'high', label: 'Originalnah', text: 'Mehr Qualität, größere Datei' },
@@ -304,8 +326,19 @@ function ProgressMeter({
   )
 }
 
-function inferFamily(file: File | null): MediaFamily {
-  if (!file) return 'video'
+function extensionFamily(ext?: string | null): MediaFamily | null {
+  if (!ext) return null
+  const normalized = ext.toLowerCase().replace(/^\./, '')
+  return mediaFamilies.find((family) => uploadExtensions[family].includes(normalized)) || null
+}
+
+function inferFamily(file: File | null): MediaFamily | null {
+  if (!file) return null
+  const ext = file.name.split('.').pop()?.toLowerCase()
+  const byExtension = extensionFamily(ext)
+  if (byExtension) return byExtension
+  if (ext) return null
+
   if (file.type.startsWith('audio/')) return 'audio'
   if (file.type.startsWith('image/')) return 'image'
   if (file.type.startsWith('video/')) return 'video'
@@ -314,15 +347,7 @@ function inferFamily(file: File | null): MediaFamily {
   if (file.type.includes('wordprocessingml') || file.type.includes('msword') || file.type.includes('opendocument.text')) return 'document'
   if (file.type.includes('spreadsheetml') || file.type.includes('ms-excel') || file.type.includes('opendocument.spreadsheet')) return 'spreadsheet'
   if (file.type.includes('presentationml') || file.type.includes('ms-powerpoint') || file.type.includes('opendocument.presentation')) return 'presentation'
-  const ext = file.name.split('.').pop()?.toLowerCase()
-  if (ext && ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'oga', 'opus', 'aiff', 'aif', 'alac', 'wma'].includes(ext)) return 'audio'
-  if (ext && ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'bmp', 'tiff', 'tif', 'ico', 'svg', 'heic', 'heif'].includes(ext)) return 'image'
-  if (ext && ['docx', 'doc', 'odt', 'rtf'].includes(ext)) return 'document'
-  if (ext && ['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return 'spreadsheet'
-  if (ext && ['pptx', 'ppt', 'odp'].includes(ext)) return 'presentation'
-  if (ext === 'pdf') return 'pdf'
-  if (ext && ['txt', 'html', 'htm'].includes(ext)) return 'text'
-  return 'video'
+  return null
 }
 
 function fileExt(name?: string | null) {
@@ -344,8 +369,12 @@ function allowedConvertFamilies(sourceFamily: MediaFamily): MediaFamily[] {
 
 function canonicalFormatValue(family: MediaFamily, value: string) {
   const normalized = value.toLowerCase()
+  if (family === 'audio' && normalized === 'aif') return 'aiff'
   if (family === 'image' && normalized === 'jpeg') return 'jpg'
   if (family === 'image' && normalized === 'tif') return 'tiff'
+  if (family === 'image' && ['j2k', 'jpf', 'jpx'].includes(normalized)) return 'jp2'
+  if ((family === 'document' || family === 'text') && normalized === 'htm') return 'html'
+  if (family === 'text' && normalized === 'markdown') return 'md'
   return normalized
 }
 
@@ -996,7 +1025,7 @@ function App() {
   }, [downloadFamily, downloadFormat, downloadCatalog])
 
   useEffect(() => {
-    const nextSource = inferFamily(selectedFile)
+    const nextSource = inferFamily(selectedFile) || 'video'
     setSourceFamily(nextSource)
     const allowed = allowedConvertFamilies(nextSource)
     const nextFamily = allowed.includes(convertFamily) ? convertFamily : allowed[0]
@@ -1033,6 +1062,25 @@ function App() {
       if (target instanceof FormData) target.set(key, value)
       else target[key] = value
     })
+  }
+
+  const handleSelectedFile = (file: File | null) => {
+    if (!file) {
+      setSelectedFile(null)
+      return
+    }
+
+    const nextFamily = inferFamily(file)
+    if (!nextFamily) {
+      setSelectedFile(null)
+      setTransfer(null)
+      setMessage(`Die Datei "${file.name}" ist nicht kompatibel.`)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      return
+    }
+
+    setMessage(null)
+    setSelectedFile(file)
   }
 
   const analyzeDownload = async () => {
@@ -1127,6 +1175,12 @@ function App() {
       setMessage('Bitte eine Datei auswählen.')
       return
     }
+    if (!inferFamily(selectedFile)) {
+      setMessage(`Die Datei "${selectedFile.name}" ist nicht kompatibel.`)
+      setSelectedFile(null)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      return
+    }
 
     const data = new FormData()
     data.set('file', selectedFile)
@@ -1214,6 +1268,9 @@ function App() {
       } else if (xhrResult.status === 413) {
         setTransfer(null)
         setMessage('Die Datei ist größer als das erlaubte Upload-Limit.')
+      } else if (xhrResult.status === 415) {
+        setTransfer(null)
+        setMessage(xhrResult.body?.detail || 'Die Datei ist nicht kompatibel.')
       } else {
         setTransfer(null)
         setMessage('Konvertierung konnte nicht gestartet werden.')
@@ -1337,7 +1394,7 @@ function App() {
   const onDropFile = (event: React.DragEvent<HTMLLabelElement>) => {
     event.preventDefault()
     const file = event.dataTransfer.files?.[0]
-    if (file) setSelectedFile(file)
+    if (file) handleSelectedFile(file)
   }
 
   const availableHeights = (downloadInfo?.formats || [])
@@ -1348,7 +1405,7 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-lockup" aria-label="MediaForge">
-          <img className="brand-mark" src={LOGO_MARK_SRC} alt="" />
+          <img className="brand-mark" src={LOGO_SRC} alt="" />
           <div>
             <h1>MediaForge</h1>
             <p>Downloads und Konvertierungen mit passenden Formaten und Feineinstellungen.</p>
@@ -1390,7 +1447,7 @@ function App() {
                 </div>
                 {downloadInfo ? (
                   <div className="inspect-result">
-                    {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" /> : <img className="media-thumb" src={LOGO_MARK_SRC} alt="" />}
+                    {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" /> : <img className="media-thumb" src={LOGO_SRC} alt="" />}
                     <div>
                       <strong>{downloadInfo.title || 'Medium erkannt'}</strong>
                       <span>{[downloadInfo.uploader, formatDuration(downloadInfo.duration)].filter(Boolean).join(' - ') || 'Bereit für den Download'}</span>
@@ -1444,10 +1501,10 @@ function App() {
                   </div>
                 </div>
                 <div className="upload-area">
-                  <input id="file-upload" ref={fileInputRef} type="file" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} />
+                  <input id="file-upload" ref={fileInputRef} type="file" accept={uploadAccept} onChange={(e) => handleSelectedFile(e.target.files?.[0] || null)} />
                   <label htmlFor="file-upload" onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
                     <strong>{selectedFile ? selectedFile.name : 'Datei auswählen oder hier ablegen'}</strong>
-                    <span>{selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]} erkannt` : 'Audio, Video, Bild oder Dokument hochladen'}</span>
+                    <span>{selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]} erkannt` : 'Unterstützte Audio-, Video-, Bild-, PDF-, Text- oder Office-Datei hochladen'}</span>
                   </label>
                 </div>
                 <ConversionCard

@@ -146,6 +146,55 @@ test('clears selected local file after successful upload conversion', async ({ p
   await expect(page.locator('text=Datei auswählen oder hier ablegen')).toBeVisible();
 });
 
+test('rejects incompatible local files before upload', async ({ page }) => {
+  let uploadAttempted = false;
+
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mp4'], audio: ['mp3'] } },
+        convert: { formats: { video: ['mp4'], audio: ['mp3'], image: ['webp'] } },
+      }),
+    });
+  });
+
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ warning: null }),
+    });
+  });
+
+  await page.route('**/api/jobs/convert-upload*', (route) => {
+    uploadAttempted = true;
+    route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'should not upload' }) });
+  });
+
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+
+  await page.setInputFiles('#file-upload', {
+    name: 'layout.psd',
+    mimeType: 'image/vnd.adobe.photoshop',
+    buffer: Buffer.from('fake-psd'),
+  });
+
+  await expect(page.locator('text=Die Datei "layout.psd" ist nicht kompatibel.')).toBeVisible();
+  await expect(page.locator('text=Datei auswählen oder hier ablegen')).toBeVisible();
+
+  await page.click('button:has-text("Konvertierung starten")');
+  await expect(page.locator('text=Bitte eine Datei auswählen.')).toBeVisible();
+  expect(uploadAttempted).toBe(false);
+});
+
 test('keeps streamed job logs stable across job polling refreshes', async ({ page }) => {
   let jobPolls = 0;
 

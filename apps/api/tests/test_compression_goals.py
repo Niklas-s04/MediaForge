@@ -20,6 +20,21 @@ def test_resolve_by_extension():
     assert fam == "audio"
 
 
+def test_resolve_common_added_extensions():
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="clip.3gp") == "video"
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="cover.jp2") == "image"
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="letter.docm") == "document"
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="sheet.xlsm") == "spreadsheet"
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="deck.ppsx") == "presentation"
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="notes.md") == "text"
+
+
+def test_resolve_photoshop_is_not_supported_by_extension():
+    goals = load_compression_goals()
+    fallback = goals.get("fallback", {}).get("family", "archive")
+    assert resolve_compression_family(mime_type=None, file_name_or_ext="layout.psd") == fallback
+
+
 def test_resolve_fallback():
     fam = resolve_compression_family(mime_type="application/octet-stream", file_name_or_ext="archive.bin")
     # fallback in the goals file should be present

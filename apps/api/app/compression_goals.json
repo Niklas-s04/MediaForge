@@ -4,7 +4,7 @@
     "audio": {
       "description": "Audio compression profiles for size-first delivery.",
       "mime_prefixes": ["audio/"],
-      "extensions": ["mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus", "aiff", "aif", "alac", "wma"],
+      "extensions": ["mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus", "weba", "mka", "aiff", "aif", "alac", "wma"],
       "profiles": {
         "balanced": {
           "target": "Small download size with acceptable speech/music quality.",
@@ -27,7 +27,7 @@
     "video": {
       "description": "Video compression profiles for web and storage savings.",
       "mime_prefixes": ["video/"],
-      "extensions": ["mp4", "mkv", "mov", "webm", "avi", "m4v", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "vob"],
+      "extensions": ["mp4", "mkv", "mov", "webm", "avi", "m4v", "mpg", "mpeg", "flv", "wmv", "ogv", "ts", "m2ts", "mts", "vob", "3gp", "3g2"],
       "profiles": {
         "balanced": {
           "target": "Web-friendly output with moderate quality retention.",
@@ -56,7 +56,7 @@
     "image": {
       "description": "Image compression profiles for storage and web previews.",
       "mime_prefixes": ["image/"],
-      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff", "tif", "ico", "svg", "heic", "heif"],
+      "extensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tiff", "tif", "ico", "svg", "heic", "heif", "jp2", "j2k", "jpf", "jpx", "tga"],
       "profiles": {
         "balanced": {
           "target": "Keep visual quality while shrinking file size.",
@@ -85,7 +85,7 @@
         "application/rtf",
         "text/html"
       ],
-      "extensions": ["docx", "doc", "odt", "rtf", "html"],
+      "extensions": ["docx", "doc", "docm", "dot", "dotx", "dotm", "odt", "rtf", "html", "htm", "mht", "mhtml"],
       "profiles": {
         "balanced": { "target": "Document conversion.", "strip_metadata": false },
         "small": { "target": "Document conversion.", "strip_metadata": false }
@@ -99,7 +99,7 @@
         "application/vnd.oasis.opendocument.spreadsheet",
         "text/csv"
       ],
-      "extensions": ["xlsx", "xls", "ods", "csv"],
+      "extensions": ["xlsx", "xls", "xlsm", "xlt", "xltx", "xltm", "ods", "csv", "tsv"],
       "profiles": {
         "balanced": { "target": "Spreadsheet conversion.", "strip_metadata": false },
         "small": { "target": "Spreadsheet conversion.", "strip_metadata": false }
@@ -112,7 +112,7 @@
         "application/vnd.openxmlformats-officedocument.presentationml",
         "application/vnd.oasis.opendocument.presentation"
       ],
-      "extensions": ["pptx", "ppt", "odp"],
+      "extensions": ["pptx", "ppt", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm", "odp"],
       "profiles": {
         "balanced": { "target": "Presentation conversion.", "strip_metadata": false },
         "small": { "target": "Presentation conversion.", "strip_metadata": false }
@@ -130,7 +130,7 @@
     "text": {
       "description": "Plain text files.",
       "mime_prefixes": ["text/plain"],
-      "extensions": ["txt"],
+      "extensions": ["txt", "md", "markdown", "log", "json", "xml", "yaml", "yml"],
       "profiles": {
         "balanced": { "target": "Text conversion.", "strip_metadata": false },
         "small": { "target": "Text conversion.", "strip_metadata": false }
