@@ -4,7 +4,7 @@ MediaForge is a self-hosted media download and conversion hub for a NAS, home se
 
 It provides a FastAPI backend, a Celery/Redis worker pipeline, ffmpeg-based media conversion and a React frontend served by the API container.
 
-The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it as `/logo.png`, and the frontend uses it for the header brand mark, media fallback thumbnail and browser tab icon.
+Committed logo assets live in `apps/frontend/public/`: `logo.png` is the transparent full source logo and `logo-mark.png` is the transparent cropped icon used for the header brand mark, media fallback thumbnail and browser tab icon.
 
 ## Features
 
@@ -162,7 +162,7 @@ npm run check
 npm run dev
 ```
 
-Static frontend assets live in `apps/frontend/public/`. Keep the committed `logo.png` there; do not keep a duplicate root-level logo file.
+Static frontend assets live in `apps/frontend/public/`. Keep the committed logo assets there; do not keep duplicate root-level logo files.
 
 Playwright E2E:
 
@@ -191,7 +191,7 @@ Before publishing a GitHub release:
 - Run backend and worker tests.
 - Run frontend typecheck/build and Playwright tests.
 - Confirm `.env` is not committed.
-- Confirm `apps/frontend/public/logo.png` exists and no duplicate root-level `logo.png` or preview scratch files are staged.
+- Confirm `apps/frontend/public/logo.png` and `apps/frontend/public/logo-mark.png` exist and no duplicate root-level logo files or preview scratch files are staged.
 - Confirm `/data/`, SQLite databases, logs, generated media, `node_modules/`, `dist/`, Playwright reports, TypeScript cache files and virtual environments are ignored.
 - Build the Docker images from a clean checkout.
 - Start the stack and verify `/health`, the frontend, one download job and one upload conversion.
@@ -201,7 +201,7 @@ Before publishing a GitHub release:
 Commit:
 
 - source code under `apps/`
-- frontend public assets, including `apps/frontend/public/logo.png`
+- frontend public assets, including `apps/frontend/public/logo.png` and `apps/frontend/public/logo-mark.png`
 - Docker files under `docker/` and app Dockerfiles
 - tests and documentation
 - `.env.example`

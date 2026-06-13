@@ -554,6 +554,23 @@ def health():
     return {"status": "ok"}
 
 
+def frontend_static_file(filename: str, media_type: str):
+    path = os.path.join(static_dir, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Frontend asset not found")
+    return FileResponse(path, media_type=media_type)
+
+
+@app.get("/logo.png", include_in_schema=False)
+def full_logo():
+    return frontend_static_file("logo.png", "image/png")
+
+
+@app.get("/logo-mark.png", include_in_schema=False)
+def logo_mark():
+    return frontend_static_file("logo-mark.png", "image/png")
+
+
 @app.get("/")
 def root():
     index_path = os.path.join(static_dir, "index.html")

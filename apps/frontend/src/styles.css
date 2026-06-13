@@ -159,13 +159,11 @@ h2 {
 
 .brand-mark {
   display: block;
-  width: 58px;
-  height: 58px;
+  width: 72px;
+  height: 72px;
   flex: 0 0 auto;
-  border-radius: 8px;
   object-fit: contain;
-  background: #020713;
-  box-shadow: 0 12px 28px rgba(36, 103, 214, 0.24);
+  filter: drop-shadow(0 12px 18px rgba(36, 103, 214, 0.18));
 }
 
 .brand-lockup p,
@@ -402,7 +400,7 @@ h2 {
 .media-thumb {
   object-fit: contain;
   padding: 0.35rem;
-  background: #020713;
+  background: transparent;
 }
 
 .inspect-result div {
