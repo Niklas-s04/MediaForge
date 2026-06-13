@@ -1,6 +1,8 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Modal from './Modal'
 
+const LOGO_SRC = '/logo.png'
+
 type Job = {
   id: number
   type: 'download' | 'convert' | string
@@ -1346,7 +1348,7 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-lockup" aria-label="MediaForge">
-          <span className="brand-mark">MF</span>
+          <img className="brand-mark" src={LOGO_SRC} alt="" />
           <div>
             <h1>MediaForge</h1>
             <p>Downloads und Konvertierungen mit passenden Formaten und Feineinstellungen.</p>
@@ -1388,7 +1390,7 @@ function App() {
                 </div>
                 {downloadInfo ? (
                   <div className="inspect-result">
-                    {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" /> : <span className="media-thumb">MF</span>}
+                    {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" /> : <img className="media-thumb" src={LOGO_SRC} alt="" />}
                     <div>
                       <strong>{downloadInfo.title || 'Medium erkannt'}</strong>
                       <span>{[downloadInfo.uploader, formatDuration(downloadInfo.duration)].filter(Boolean).join(' - ') || 'Bereit für den Download'}</span>

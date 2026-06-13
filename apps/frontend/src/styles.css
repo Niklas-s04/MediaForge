@@ -158,16 +158,13 @@ h2 {
 }
 
 .brand-mark {
-  display: grid;
-  width: 50px;
-  height: 50px;
+  display: block;
+  width: 58px;
+  height: 58px;
   flex: 0 0 auto;
-  place-items: center;
   border-radius: 8px;
-  color: #fff;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  font-weight: 850;
-  letter-spacing: 0;
+  object-fit: contain;
+  background: #020713;
   box-shadow: 0 12px 28px rgba(36, 103, 214, 0.24);
 }
 
@@ -403,10 +400,9 @@ h2 {
 }
 
 .media-thumb {
-  display: grid;
-  place-items: center;
-  color: var(--primary-dark);
-  font-weight: 820;
+  object-fit: contain;
+  padding: 0.35rem;
+  background: #020713;
 }
 
 .inspect-result div {

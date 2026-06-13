@@ -4,6 +4,8 @@ MediaForge is a self-hosted media download and conversion hub for a NAS, home se
 
 It provides a FastAPI backend, a Celery/Redis worker pipeline, ffmpeg-based media conversion and a React frontend served by the API container.
 
+The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it as `/logo.png`, and the frontend uses it for the header brand mark, media fallback thumbnail and browser tab icon.
+
 ## Features
 
 - Download online media and convert it to common audio or video formats.
@@ -126,7 +128,7 @@ DOCUMENT_CONVERT_TIMEOUT_SECONDS=120
 
 `DOCUMENT_CONVERT_TIMEOUT_SECONDS` controls the LibreOffice/Poppler conversion timeout for uploaded document jobs.
 
-Runtime files are stored in `data/` locally and mounted as `/data` inside the containers. This directory is ignored by Git.
+Runtime files are stored in the root `data/` directory locally and mounted as `/data` inside the containers. The database, logs, uploads, temporary processing files, generated output and archives belong there and are ignored by Git.
 
 ## Data Retention
 
@@ -160,6 +162,8 @@ npm run check
 npm run dev
 ```
 
+Static frontend assets live in `apps/frontend/public/`. Keep the committed `logo.png` there; do not keep a duplicate root-level logo file.
+
 Playwright E2E:
 
 ```powershell
@@ -169,7 +173,7 @@ npx playwright test --config=playwright.config.ts
 
 ## Docker Images
 
-The API image builds the frontend and copies the Vite output to `/app/static`. Do not commit `apps/frontend/dist`.
+The API image builds the frontend and copies the Vite output to `/app/static`. Commit source files and public frontend assets, but do not commit `apps/frontend/dist`.
 
 The worker image installs ffmpeg, LibreOffice, Poppler tools and fonts, then runs Celery. Actual codec availability depends on the ffmpeg package in the image.
 
@@ -187,7 +191,8 @@ Before publishing a GitHub release:
 - Run backend and worker tests.
 - Run frontend typecheck/build and Playwright tests.
 - Confirm `.env` is not committed.
-- Confirm `data/`, SQLite databases, logs, generated media, `node_modules/`, `dist/`, Playwright reports and virtual environments are ignored.
+- Confirm `apps/frontend/public/logo.png` exists and no duplicate root-level `logo.png` or preview scratch files are staged.
+- Confirm `/data/`, SQLite databases, logs, generated media, `node_modules/`, `dist/`, Playwright reports, TypeScript cache files and virtual environments are ignored.
 - Build the Docker images from a clean checkout.
 - Start the stack and verify `/health`, the frontend, one download job and one upload conversion.
 
@@ -196,6 +201,7 @@ Before publishing a GitHub release:
 Commit:
 
 - source code under `apps/`
+- frontend public assets, including `apps/frontend/public/logo.png`
 - Docker files under `docker/` and app Dockerfiles
 - tests and documentation
 - `.env.example`
@@ -204,8 +210,9 @@ Commit:
 Do not commit:
 
 - `.env` or secrets
-- `data/`, SQLite databases, logs or generated media files
+- `/data/`, SQLite databases, logs or generated media files
 - `node_modules/`, `dist/`, Playwright reports or Python virtual environments
+- root-level scratch assets such as `/logo.png`, `tmp_*` files or local preview HTML
 - local Docker override files
 
 ## Structure
@@ -213,7 +220,7 @@ Do not commit:
 ```text
 apps/api       FastAPI app, models, schemas and tests
 apps/worker    Celery worker and worker tests
-apps/frontend  React/Vite frontend and E2E tests
+apps/frontend  React/Vite frontend, public assets and E2E tests
 docker          Docker Compose stack
 docs            Notes and risk documentation
 scripts         Local recovery/helper scripts
