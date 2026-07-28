@@ -94,13 +94,13 @@ test('confirms small quality warning through force job creation', async ({ page 
   expect(jobRequests).toHaveLength(2);
   expect(jobRequests[0].force).toBeNull();
   expect(jobRequests[0].body.input.output_kind).toBe('video');
-  expect(jobRequests[0].body.input.output_format).toBe('mp4');
+  expect(jobRequests[0].body.input.output_format).toBe('mkv');
   expect(jobRequests[0].body.input.quality_preset).toBe('small');
   expect(jobRequests[0].body.input.compression_profile).toBe('small');
   expect(jobRequests[1].force).toBe('true');
 });
 
-test('clears selected local file after successful upload conversion', async ({ page }) => {
+test('clears selected local files after successful batch conversion', async ({ page }) => {
   await page.route('**/api/compression/profile*', (route) => {
     route.fulfill({
       status: 200,
@@ -109,11 +109,14 @@ test('clears selected local file after successful upload conversion', async ({ p
     });
   });
 
-  await page.route('**/api/jobs/convert-upload*', (route) => {
+  await page.route('**/api/jobs/convert-batch*', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ id: 456, type: 'convert', status: 'queued', progress: 0 }),
+      body: JSON.stringify({
+        batch_id: 'batch-456',
+        jobs: [{ id: 456, type: 'convert', status: 'queued', progress: 0 }],
+      }),
     });
   });
 
@@ -136,14 +139,95 @@ test('clears selected local file after successful upload conversion', async ({ p
     mimeType: 'audio/wav',
     buffer: Buffer.from('fake-audio'),
   });
-  await expect(page.locator('.convert-card').getByText('sample.wav')).toBeVisible();
+  await expect(page.locator('.batch-file-row').getByText('sample.wav')).toBeVisible();
   await expect(page.getByRole('button', { name: /MP3 Audio/ })).toBeVisible();
 
-  await page.click('button:has-text("Konvertierung starten")');
+  await page.click('button:has-text("1 Konvertierung starten")');
 
-  await expect(page.locator('text=Konvertierung gestartet: Auftrag #456')).toBeVisible();
+  await expect(page.locator('text=Batch gestartet: 1 Konvertierungen')).toBeVisible();
   await expect(page.locator('text=sample.wav')).toHaveCount(0);
-  await expect(page.locator('text=Datei auswählen oder hier ablegen')).toBeVisible();
+  await expect(page.locator('text=Dateien auswählen oder hier ablegen')).toBeVisible();
+});
+
+test('configures batch formats per file and downloads the finished ZIP', async ({ page }) => {
+  let batchStarted = false;
+  let multipartBody = '';
+  const finishedJobs = [
+    { id: 701, type: 'convert', status: 'success', progress: 100, current_step: 'Fertig', output_path: '/data/output/job-701-clip.mkv' },
+    { id: 702, type: 'convert', status: 'success', progress: 100, current_step: 'Fertig', output_path: '/data/output/job-702-photo.jpg' },
+  ];
+
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mkv'], audio: ['mp3'] } },
+        convert: { formats: { video: ['mkv', 'mp4'], audio: ['mp3'], image: ['png', 'jpg'] } },
+      }),
+    });
+  });
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+  await page.route('**/api/jobs/convert-batch*', (route) => {
+    multipartBody = route.request().postData() || '';
+    batchStarted = true;
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        batch_id: 'batch-ui',
+        jobs: finishedJobs.map((job) => ({ ...job, status: 'queued', progress: 0, output_path: null })),
+      }),
+    });
+  });
+  await page.route('**/api/jobs/*/events', (route) => {
+    route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'id: 0\ndata: {"status":"success"}\n\n' });
+  });
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(batchStarted ? finishedJobs : []),
+    });
+  });
+  await page.route('**/api/batches/batch-ui/download', (route) => {
+    route.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': 'attachment; filename="mediaforge-batch-batch-ui.zip"',
+      },
+      body: Buffer.from('fake-zip'),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+  await page.setInputFiles('#file-upload', [
+    { name: 'clip.mp4', mimeType: 'video/mp4', buffer: Buffer.from('video') },
+    { name: 'photo.png', mimeType: 'image/png', buffer: Buffer.from('image') },
+  ]);
+
+  const rows = page.locator('.batch-file-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).getByRole('button', { name: /MKV Video/ })).toBeVisible();
+  await rows.nth(1).getByRole('button', { name: /PNG Bild/ }).click();
+  await rows.nth(1).locator('.format-results').getByRole('button', { name: /JPG/ }).click();
+  await expect(rows.nth(1).getByRole('button', { name: /JPG Bild/ })).toBeVisible();
+  await expect(rows.nth(0).getByRole('button', { name: /MKV Video/ })).toBeVisible();
+
+  await page.click('button:has-text("2 Konvertierungen starten")');
+  await expect(page.getByRole('button', { name: 'ZIP herunterladen (2)' })).toBeEnabled();
+  expect(multipartBody).toContain('{"compression_family":"video","output_format":"mkv"}');
+  expect(multipartBody).toContain('{"compression_family":"image","output_format":"jpg"}');
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'ZIP herunterladen (2)' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('mediaforge-batch-batch-ui.zip');
 });
 
 test('rejects incompatible local files before upload', async ({ page }) => {
@@ -168,7 +252,7 @@ test('rejects incompatible local files before upload', async ({ page }) => {
     });
   });
 
-  await page.route('**/api/jobs/convert-upload*', (route) => {
+  await page.route('**/api/jobs/convert-batch*', (route) => {
     uploadAttempted = true;
     route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'should not upload' }) });
   });
@@ -187,11 +271,11 @@ test('rejects incompatible local files before upload', async ({ page }) => {
     buffer: Buffer.from('fake-psd'),
   });
 
-  await expect(page.locator('text=Die Datei "layout.psd" ist nicht kompatibel.')).toBeVisible();
-  await expect(page.locator('text=Datei auswählen oder hier ablegen')).toBeVisible();
+  await expect(page.locator('text=Nicht kompatibel: layout.psd')).toBeVisible();
+  await expect(page.locator('text=Dateien auswählen oder hier ablegen')).toBeVisible();
 
-  await page.click('button:has-text("Konvertierung starten")');
-  await expect(page.locator('text=Bitte eine Datei auswählen.')).toBeVisible();
+  await page.click('button:has-text("Konvertierungen starten")');
+  await expect(page.locator('text=Bitte mindestens eine Datei auswählen.')).toBeVisible();
   expect(uploadAttempted).toBe(false);
 });
 
@@ -261,12 +345,15 @@ test('shows upload processing state before conversion job is created', async ({ 
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
   });
 
-  await page.route('**/api/jobs/convert-upload*', async (route) => {
+  await page.route('**/api/jobs/convert-batch*', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ id: 654, type: 'convert', status: 'queued', progress: 0 }),
+      body: JSON.stringify({
+        batch_id: 'batch-654',
+        jobs: [{ id: 654, type: 'convert', status: 'queued', progress: 0 }],
+      }),
     });
   });
 
@@ -283,9 +370,9 @@ test('shows upload processing state before conversion job is created', async ({ 
     buffer: Buffer.alloc(5 * 1024 * 1024, 1),
   });
 
-  await page.click('button:has-text("Konvertierung starten")');
+  await page.click('button:has-text("1 Konvertierung starten")');
   await expect(page.locator('.transfer-progress')).toContainText(/Upload|verarbeitet/);
-  await expect(page.locator('text=Konvertierung gestartet: Auftrag #654')).toBeVisible();
+  await expect(page.locator('text=Batch gestartet: 1 Konvertierungen')).toBeVisible();
 });
 
 test('downloads finished output with unknown response length', async ({ page }) => {
@@ -441,7 +528,7 @@ test('shows document formats for uploaded office files', async ({ page }) => {
     buffer: Buffer.from('fake-docx'),
   });
 
-  await expect(page.getByText('Dokument erkannt')).toBeVisible();
+  await expect(page.locator('.batch-file-row').getByText(/KB · Dokument/)).toBeVisible();
   await page.getByRole('button', { name: /DOCX Dokument/ }).click();
   await expect(page.locator('.format-menu')).toBeVisible();
   await expect(page.locator('.format-results').getByRole('button', { name: /PDF/ })).toBeVisible();
@@ -483,8 +570,8 @@ test('shows canonical image formats and PDF image bridge', async ({ page }) => {
     buffer: Buffer.from('fake-jpg'),
   });
 
-  await expect(page.getByText('Bild erkannt')).toBeVisible();
-  await page.getByRole('button', { name: /WebP Bild/ }).click();
+  await expect(page.locator('.batch-file-row').getByText(/KB · Bild/)).toBeVisible();
+  await page.getByRole('button', { name: /PNG Bild/ }).click();
   await expect(page.locator('.format-results').getByRole('button', { name: /JPG/ })).toBeVisible();
   await expect(page.locator('.format-results').getByRole('button', { name: /TIFF/ })).toHaveCount(1);
   await expect(page.locator('.format-results').getByRole('button', { name: /JPEG/ })).toHaveCount(0);
@@ -501,8 +588,10 @@ test('shows canonical image formats and PDF image bridge', async ({ page }) => {
     buffer: Buffer.from('fake-pdf'),
   });
 
-  await expect(page.getByText('PDF erkannt')).toBeVisible();
-  await page.getByRole('button', { name: /WebP Bild/ }).click();
+  const pdfRow = page.locator('.batch-file-row').filter({ hasText: 'scan.pdf' });
+  await expect(pdfRow.getByText(/KB · PDF/)).toBeVisible();
+  await pdfRow.getByRole('button', { name: /PDF PDF/ }).click();
+  await pdfRow.locator('.format-categories').getByRole('button', { name: 'Bild' }).click();
   await expect(page.locator('.format-results').getByRole('button', { name: /JPG/ })).toBeVisible();
   await expect(page.locator('.format-results').getByRole('button', { name: /ICO/ })).toBeVisible();
   await expect(page.locator('.format-results').getByRole('button', { name: /SVG/ })).toBeVisible();

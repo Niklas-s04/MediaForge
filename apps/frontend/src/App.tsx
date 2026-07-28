@@ -70,6 +70,14 @@ type AdvancedValues = {
   image_quality: string
 }
 
+type BatchFile = {
+  id: string
+  file: File
+  sourceFamily: MediaFamily
+  outputFamily: MediaFamily
+  outputFormat: string
+}
+
 const terminalStatuses = ['success', 'failed', 'cancelled', 'expired', 'deleted', 'notfound']
 
 const formatCatalog: Record<MediaFamily, FormatDef[]> = {
@@ -367,6 +375,19 @@ function allowedConvertFamilies(sourceFamily: MediaFamily): MediaFamily[] {
   return [sourceFamily]
 }
 
+function defaultFormatForFamily(family: MediaFamily) {
+  return {
+    audio: 'mp3',
+    video: 'mkv',
+    image: 'png',
+    document: 'docx',
+    spreadsheet: 'xlsx',
+    presentation: 'pptx',
+    pdf: 'pdf',
+    text: 'txt',
+  }[family]
+}
+
 function canonicalFormatValue(family: MediaFamily, value: string) {
   const normalized = value.toLowerCase()
   if (family === 'audio' && normalized === 'aif') return 'aiff'
@@ -406,6 +427,14 @@ function buildCatalogFromOptions(options: OptionsResponse | null, scope: 'downlo
     })
   })
   return next
+}
+
+function catalogForSource(catalog: Record<MediaFamily, FormatDef[]>, sourceFamily: MediaFamily) {
+  if (sourceFamily !== 'image') return catalog
+  return {
+    ...catalog,
+    pdf: catalog.pdf.filter((format) => format.value === 'pdf'),
+  }
 }
 
 function FormatPicker({
@@ -908,7 +937,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('download')
   const [url, setUrl] = useState('')
   const [downloadFamily, setDownloadFamily] = useState<MediaFamily>('video')
-  const [downloadFormat, setDownloadFormat] = useState('mp4')
+  const [downloadFormat, setDownloadFormat] = useState('mkv')
   const [downloadQuality, setDownloadQuality] = useState('best')
   const [downloadQualityPreset, setDownloadQualityPreset] = useState<QualityPreset>('balanced')
   const [downloadAdvanced, setDownloadAdvanced] = useState<AdvancedValues>(defaultAdvanced)
@@ -916,15 +945,14 @@ function App() {
   const [isInspecting, setIsInspecting] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [message, setMessage] = useState<string | null>(null)
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [sourceFamily, setSourceFamily] = useState<MediaFamily>('video')
-  const [convertFamily, setConvertFamily] = useState<MediaFamily>('video')
-  const [convertFormat, setConvertFormat] = useState('mp4')
+  const [convertFiles, setConvertFiles] = useState<BatchFile[]>([])
+  const [batchId, setBatchId] = useState<string | null>(null)
+  const [batchJobIds, setBatchJobIds] = useState<number[]>([])
   const [convertQualityPreset, setConvertQualityPreset] = useState<QualityPreset>('balanced')
   const [convertAdvanced, setConvertAdvanced] = useState<AdvancedValues>(defaultAdvanced)
   const [stripMetadata, setStripMetadata] = useState(true)
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [pickerOpen, setPickerOpen] = useState<ActiveTab | null>(null)
+  const [pickerOpen, setPickerOpen] = useState<string | null>(null)
   const [compressionWarning, setCompressionWarning] = useState<string | null>(null)
   const [pendingWarning, setPendingWarning] = useState<string | null>(null)
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
@@ -940,14 +968,10 @@ function App() {
     () => jobs.filter((job) => ['queued', 'running'].includes((job.status || '').toLowerCase())).length,
     [jobs],
   )
-  const convertFamilies = allowedConvertFamilies(sourceFamily)
-  const visibleConvertCatalog = useMemo(() => {
-    if (sourceFamily !== 'image') return convertCatalog
-    return {
-      ...convertCatalog,
-      pdf: convertCatalog.pdf.filter((format) => format.value === 'pdf'),
-    }
-  }, [convertCatalog, sourceFamily])
+  const convertFamily = convertFiles[0]?.outputFamily || 'video'
+  const batchJobs = useMemo(() => batchJobIds.map((id) => jobs.find((job) => job.id === id)).filter((job): job is Job => Boolean(job)), [batchJobIds, jobs])
+  const batchFinished = batchJobIds.length > 0 && batchJobs.length === batchJobIds.length && batchJobs.every((job) => terminalStatuses.includes((job.status || '').toLowerCase()))
+  const batchSuccessCount = batchJobs.filter((job) => job.status === 'success' && job.output_path).length
   const activeQuality = activeTab === 'download' ? downloadQualityPreset : convertQualityPreset
   const activeWarningFamily = activeTab === 'download' ? downloadFamily : convertFamily
 
@@ -1025,28 +1049,6 @@ function App() {
   }, [downloadFamily, downloadFormat, downloadCatalog])
 
   useEffect(() => {
-    const nextSource = inferFamily(selectedFile) || 'video'
-    setSourceFamily(nextSource)
-    const allowed = allowedConvertFamilies(nextSource)
-    const nextFamily = allowed.includes(convertFamily) ? convertFamily : allowed[0]
-    setConvertFamily(nextFamily)
-    if (!visibleConvertCatalog[nextFamily].some((format) => format.value === convertFormat)) {
-      setConvertFormat(visibleConvertCatalog[nextFamily][0].value)
-    }
-  }, [selectedFile, convertFamily, convertFormat, convertCatalog, visibleConvertCatalog])
-
-  useEffect(() => {
-    if (!convertFamilies.includes(convertFamily)) {
-      setConvertFamily(convertFamilies[0])
-      setConvertFormat(visibleConvertCatalog[convertFamilies[0]][0].value)
-      return
-    }
-    if (!visibleConvertCatalog[convertFamily].some((format) => format.value === convertFormat)) {
-      setConvertFormat(visibleConvertCatalog[convertFamily][0].value)
-    }
-  }, [convertFamily, convertFormat, convertFamilies, visibleConvertCatalog])
-
-  useEffect(() => {
     const warningProfile = activeQuality === 'small' ? 'small' : 'balanced'
     fetch(
       `/api/compression/profile?family=${encodeURIComponent(activeWarningFamily)}&profile=${encodeURIComponent(warningProfile)}&lang=de`,
@@ -1064,23 +1066,27 @@ function App() {
     })
   }
 
-  const handleSelectedFile = (file: File | null) => {
-    if (!file) {
-      setSelectedFile(null)
-      return
-    }
-
-    const nextFamily = inferFamily(file)
-    if (!nextFamily) {
-      setSelectedFile(null)
-      setTransfer(null)
-      setMessage(`Die Datei "${file.name}" ist nicht kompatibel.`)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-      return
-    }
-
-    setMessage(null)
-    setSelectedFile(file)
+  const handleSelectedFiles = (files: File[]) => {
+    const compatible: BatchFile[] = []
+    const incompatible: string[] = []
+    files.forEach((file, index) => {
+      const source = inferFamily(file)
+      if (!source) {
+        incompatible.push(file.name)
+        return
+      }
+      compatible.push({
+        id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
+        file,
+        sourceFamily: source,
+        outputFamily: source,
+        outputFormat: defaultFormatForFamily(source),
+      })
+    })
+    if (compatible.length) setConvertFiles((current) => [...current, ...compatible])
+    setTransfer(null)
+    setMessage(incompatible.length ? `Nicht kompatibel: ${incompatible.join(', ')}` : null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const analyzeDownload = async () => {
@@ -1171,24 +1177,19 @@ function App() {
   }
 
   const createConvertJob = async (force = false) => {
-    if (!selectedFile) {
-      setMessage('Bitte eine Datei auswählen.')
+    if (!convertFiles.length) {
+      setMessage('Bitte mindestens eine Datei auswählen.')
       return
     }
-    if (!inferFamily(selectedFile)) {
-      setMessage(`Die Datei "${selectedFile.name}" ist nicht kompatibel.`)
-      setSelectedFile(null)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-      return
-    }
-
     const data = new FormData()
-    data.set('file', selectedFile)
+    convertFiles.forEach((item) => data.append('files', item.file))
+    data.set('settings', JSON.stringify(convertFiles.map((item) => ({
+      compression_family: item.outputFamily,
+      output_format: item.outputFormat,
+    }))))
     data.set('preset', 'default')
-    data.set('compression_family', convertFamily)
     data.set('compression_profile', convertQualityPreset === 'small' ? 'small' : 'balanced')
     data.set('quality_preset', convertQualityPreset)
-    data.set('output_format', convertFormat)
     data.set('strip_metadata', stripMetadata ? 'true' : 'false')
     data.set('lang', 'de')
     appendAdvanced(data, convertAdvanced)
@@ -1199,20 +1200,21 @@ function App() {
       if (force) params.set('force', 'true')
       const suffix = params.toString() ? `?${params.toString()}` : ''
       const startedAt = Date.now()
+      const totalSize = convertFiles.reduce((sum, item) => sum + item.file.size, 0)
       setTransfer({
         phase: 'upload',
         loaded: 0,
-        total: selectedFile.size,
+        total: totalSize,
         startedAt,
         progress: 0,
         etaSeconds: null,
-        label: `Upload: ${selectedFile.name}`,
+        label: `Batch-Upload: ${convertFiles.length} Dateien`,
       })
       const xhrResult = await new Promise<{ status: number; body: any }>((resolve, reject) => {
         const xhr = new XMLHttpRequest()
-        xhr.open('POST', `/api/jobs/convert-upload${suffix}`)
+        xhr.open('POST', `/api/jobs/convert-batch${suffix}`)
         xhr.upload.onprogress = (event) => {
-          const total = event.lengthComputable ? event.total : selectedFile.size
+          const total = event.lengthComputable ? event.total : totalSize
           const loaded = event.loaded
           const complete = total > 0 && loaded >= total
           setTransfer({
@@ -1222,7 +1224,7 @@ function App() {
             startedAt,
             progress: total ? Math.round((loaded / total) * 100) : 0,
             etaSeconds: complete ? 0 : estimateEta(loaded, total, startedAt),
-            label: complete ? 'Upload wird verarbeitet' : `Upload: ${selectedFile.name}`,
+            label: complete ? 'Batch wird verarbeitet' : `Batch-Upload: ${convertFiles.length} Dateien`,
           })
         }
         xhr.onload = () => {
@@ -1230,7 +1232,7 @@ function App() {
             ...current,
             progress: 100,
             etaSeconds: 0,
-            label: 'Upload wird verarbeitet',
+            label: 'Batch wird verarbeitet',
           } : current)
           let body: any = null
           try {
@@ -1245,20 +1247,15 @@ function App() {
       })
       if (xhrResult.status >= 200 && xhrResult.status < 300) {
         const created = xhrResult.body
-        setSelectedFile(null)
+        const createdJobs: Job[] = Array.isArray(created?.jobs) ? created.jobs : []
+        setConvertFiles([])
         if (fileInputRef.current) fileInputRef.current.value = ''
         setPendingWarning(null)
-        setMessage(`Konvertierung gestartet: Auftrag #${created.id}`)
-        setSelectedId(created.id)
-        setTransfer({
-          phase: 'convert',
-          jobId: created.id,
-          loaded: 0,
-          startedAt: Date.now(),
-          progress: created.progress || 0,
-          etaSeconds: null,
-          label: `Konvertierung: Auftrag #${created.id}`,
-        })
+        setBatchId(created.batch_id)
+        setBatchJobIds(createdJobs.map((job) => job.id))
+        setMessage(`Batch gestartet: ${createdJobs.length} Konvertierungen`)
+        setSelectedId(createdJobs[createdJobs.length - 1]?.id || null)
+        setTransfer(null)
         loadJobs()
       } else if (xhrResult.status === 409) {
         const warning = xhrResult.body
@@ -1273,11 +1270,34 @@ function App() {
         setMessage(xhrResult.body?.detail || 'Die Datei ist nicht kompatibel.')
       } else {
         setTransfer(null)
-        setMessage('Konvertierung konnte nicht gestartet werden.')
+        setMessage(xhrResult.body?.detail || 'Batch-Konvertierung konnte nicht gestartet werden.')
       }
     } catch (e) {
       setTransfer(null)
-      setMessage('Konvertierung konnte nicht gestartet werden.')
+      setMessage('Batch-Konvertierung konnte nicht gestartet werden.')
+    }
+  }
+
+  const downloadBatch = async () => {
+    if (!batchId) return
+    try {
+      setMessage(null)
+      const r = await fetch(`/api/batches/${encodeURIComponent(batchId)}/download`)
+      if (!r.ok) {
+        setMessage(r.status === 409 ? 'Der Batch ist noch nicht vollständig abgeschlossen.' : 'ZIP-Download konnte nicht erstellt werden.')
+        return
+      }
+      const blob = await r.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = filenameFromDisposition(r.headers.get('Content-Disposition')) || `mediaforge-batch-${batchId.slice(0, 8)}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(objectUrl)
+    } catch (e) {
+      setMessage('ZIP-Download ist fehlgeschlagen.')
     }
   }
 
@@ -1393,8 +1413,8 @@ function App() {
 
   const onDropFile = (event: React.DragEvent<HTMLLabelElement>) => {
     event.preventDefault()
-    const file = event.dataTransfer.files?.[0]
-    if (file) handleSelectedFile(file)
+    const files = Array.from(event.dataTransfer.files || [])
+    if (files.length) handleSelectedFiles(files)
   }
 
   const availableHeights = (downloadInfo?.formats || [])
@@ -1497,34 +1517,65 @@ function App() {
                 <div className="panel-header">
                   <div>
                     <p className="eyebrow">Lokale Datei</p>
-                    <h2>Datei konvertieren</h2>
+                    <h2>Dateien im Batch konvertieren</h2>
                   </div>
                 </div>
                 <div className="upload-area">
-                  <input id="file-upload" ref={fileInputRef} type="file" accept={uploadAccept} onChange={(e) => handleSelectedFile(e.target.files?.[0] || null)} />
+                  <input id="file-upload" ref={fileInputRef} type="file" multiple accept={uploadAccept} onChange={(e) => handleSelectedFiles(Array.from(e.target.files || []))} />
                   <label htmlFor="file-upload" onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
-                    <strong>{selectedFile ? selectedFile.name : 'Datei auswählen oder hier ablegen'}</strong>
-                    <span>{selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]} erkannt` : 'Unterstützte Audio-, Video-, Bild-, PDF-, Text- oder Office-Datei hochladen'}</span>
+                    <strong>{convertFiles.length ? `${convertFiles.length} Datei(en) ausgewählt – weitere hinzufügen` : 'Dateien auswählen oder hier ablegen'}</strong>
+                    <span>Mehrere Audio-, Video-, Bild-, PDF-, Text- oder Office-Dateien gleichzeitig auswählen</span>
                   </label>
                 </div>
-                <ConversionCard
-                  catalog={visibleConvertCatalog}
-                  sourceTitle={selectedFile?.name || 'Keine Datei ausgewählt'}
-                  sourceMeta={selectedFile ? `${formatBytes(selectedFile.size)} - ${familyLabels[sourceFamily]}` : 'Datei hochladen, dann Ziel-Format wählen'}
-                  sourceFormat={selectedFile ? fileExt(selectedFile.name) : 'FILE'}
-                  families={convertFamilies}
-                  selectedFamily={convertFamily}
-                  selectedFormat={convertFormat}
-                  pickerOpen={pickerOpen === 'convert'}
-                  onPickerOpen={(open) => setPickerOpen(open ? 'convert' : null)}
-                  onSelect={(family, format) => {
-                    setConvertFamily(family)
-                    setConvertFormat(format)
-                  }}
-                />
+                {convertFiles.length ? (
+                  <div className="batch-file-list">
+                    {convertFiles.map((item) => {
+                      const itemCatalog = catalogForSource(convertCatalog, item.sourceFamily)
+                      const pickerId = `convert-${item.id}`
+                      return (
+                        <div className="batch-file-row" key={item.id}>
+                          <div className="source-file">
+                            <span className="file-icon">{fileExt(item.file.name).slice(0, 3)}</span>
+                            <div>
+                              <strong>{item.file.name}</strong>
+                              <span>{formatBytes(item.file.size)} · {familyLabels[item.sourceFamily]}</span>
+                            </div>
+                          </div>
+                          <div className="convert-chain">
+                            <span className="format-chip">{fileExt(item.file.name)}</span>
+                            <span className="arrow">-&gt;</span>
+                            <FormatPicker
+                              catalog={itemCatalog}
+                              families={allowedConvertFamilies(item.sourceFamily)}
+                              selectedFamily={item.outputFamily}
+                              selectedFormat={item.outputFormat}
+                              open={pickerOpen === pickerId}
+                              onOpenChange={(open) => setPickerOpen(open ? pickerId : null)}
+                              onSelect={(family, format) => {
+                                setConvertFiles((current) => current.map((candidate) => candidate.id === item.id
+                                  ? { ...candidate, outputFamily: family, outputFormat: format }
+                                  : candidate))
+                              }}
+                            />
+                            <button
+                              className="button ghost batch-remove"
+                              type="button"
+                              aria-label={`${item.file.name} entfernen`}
+                              onClick={() => setConvertFiles((current) => current.filter((candidate) => candidate.id !== item.id))}
+                            >
+                              Entfernen
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <EmptyState title="Noch keine Dateien ausgewählt" text="Jede Datei kann im Batch ein eigenes Zielformat erhalten." />
+                )}
                 <div className="options-block">
                   <div className="options-title">
-                    <span>Qualität</span>
+                    <span>Gemeinsame Qualitätseinstellungen</span>
                     <button className="link-button" type="button" onClick={() => setAdvancedOpen((open) => !open)}>
                       {advancedOpen ? 'Optionen ausblenden' : 'Detaillierte Optionen'}
                     </button>
@@ -1547,8 +1598,13 @@ function App() {
 
             <div className="panel-footer">
               <button className="button primary" data-testid="create-job" type="button" onClick={() => (activeTab === 'download' ? createDownloadJob() : createConvertJob())}>
-                {activeTab === 'download' ? 'Download starten' : 'Konvertierung starten'}
+                {activeTab === 'download' ? 'Download starten' : `${convertFiles.length || ''} Konvertierung${convertFiles.length === 1 ? '' : 'en'} starten`}
               </button>
+              {activeTab === 'convert' && batchId ? (
+                <button className="button secondary" type="button" disabled={!batchFinished || batchSuccessCount === 0} onClick={downloadBatch}>
+                  {batchFinished ? `ZIP herunterladen (${batchSuccessCount})` : `Batch läuft (${batchSuccessCount}/${batchJobIds.length})`}
+                </button>
+              ) : null}
             </div>
             {transfer ? (
               <div className="transfer-progress">

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+import os
+import zipfile
 
 import pytest
 from fastapi import HTTPException
@@ -64,6 +66,49 @@ def test_download_job_output_rejects_expired_job():
             download_job_output(job.id, session=session)
 
     assert exc.value.status_code == 410
+
+
+def test_download_batch_output_contains_all_successful_files(monkeypatch, tmp_path: Path):
+    engine = create_test_engine()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    first_file = output_dir / "job-1-video.mkv"
+    second_file = output_dir / "job-2-image.png"
+    first_file.write_bytes(b"video")
+    second_file.write_bytes(b"image")
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+
+    with Session(engine) as session:
+        session.add(Job(type="convert", status="success", output_path=str(first_file), input={"batch_id": "batch-test"}))
+        session.add(Job(type="convert", status="success", output_path=str(second_file), input={"batch_id": "batch-test"}))
+        session.add(Job(type="convert", status="failed", input={"batch_id": "batch-test"}))
+        session.add(Job(type="convert", status="success", output_path=str(first_file), input={"batch_id": "other-batch"}))
+        session.commit()
+
+        response = api_main.download_batch_output("batch-test", session=session)
+
+    try:
+        with zipfile.ZipFile(response.path) as archive:
+            assert archive.namelist() == ["job-1-video.mkv", "job-2-image.png"]
+            assert archive.read("job-1-video.mkv") == b"video"
+            assert archive.read("job-2-image.png") == b"image"
+        assert response.filename == "mediaforge-batch-batch-te.zip"
+    finally:
+        os.remove(response.path)
+
+
+def test_download_batch_output_waits_for_running_jobs(monkeypatch, tmp_path: Path):
+    engine = create_test_engine()
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(tmp_path))
+
+    with Session(engine) as session:
+        session.add(Job(type="convert", status="running", input={"batch_id": "batch-running"}))
+        session.commit()
+
+        with pytest.raises(HTTPException) as exc:
+            api_main.download_batch_output("batch-running", session=session)
+
+    assert exc.value.status_code == 409
 
 
 def test_expire_old_job_outputs_deletes_file_and_hides_job(monkeypatch, tmp_path: Path):

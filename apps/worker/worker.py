@@ -23,8 +23,8 @@ celery_app = Celery("worker", broker=redis_url, backend=redis_url)
 
 DEFAULT_FORMATS = {
     "audio": "mp3",
-    "video": "mp4",
-    "image": "webp",
+    "video": "mkv",
+    "image": "png",
     "document": "docx",
     "spreadsheet": "xlsx",
     "presentation": "pptx",

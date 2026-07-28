@@ -9,13 +9,16 @@ The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it 
 ## Features
 
 - Download online media and convert it to common audio or video formats.
-- Convert uploaded audio, video, image, PDF, Office and OpenDocument files.
+- Convert multiple uploaded audio, video, image, PDF, Office and OpenDocument files in one batch.
+- Choose the target format separately for every file, download results individually or bundle a completed batch as ZIP.
 - Choose quality presets, target format and advanced codec settings.
 - Stream job progress and logs with Server-Sent Events.
 - Keep generated output files for 24 hours by default, show a live deletion timer and delete them automatically to save storage.
 - Extend individual finished jobs by 24 hours or delete them manually before expiry.
 - Hide expired and manually deleted jobs from the frontend job lists.
 - Remove uploaded source files after processing.
+
+The default output formats are MKV for video, PNG for images and MP3 for audio.
 
 ## Supported Output Formats
 

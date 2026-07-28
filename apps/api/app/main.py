@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from .db import create_db_and_tables, engine, get_session
 from . import crud, models
@@ -14,6 +15,8 @@ import time
 import json
 import uuid
 import threading
+import tempfile
+import zipfile
 from fastapi.responses import StreamingResponse, FileResponse
 import logging
 from .compression_goals import (
@@ -367,7 +370,7 @@ def normalize_download_input(input_obj: dict) -> dict:
     if output_kind not in DOWNLOAD_FORMATS:
         raise HTTPException(status_code=400, detail=f"Unsupported download output kind '{output_kind}'")
 
-    default_format = "mp3" if output_kind == "audio" else "mp4"
+    default_format = "mp3" if output_kind == "audio" else "mkv"
     output_format = str(normalized.get("output_format") or default_format).lower().lstrip(".")
     if output_format not in DOWNLOAD_FORMATS[output_kind]:
         raise HTTPException(
@@ -440,8 +443,8 @@ def normalize_convert_options(
 
     default_format = {
         "audio": "mp3",
-        "video": "mp4",
-        "image": "webp",
+        "video": "mkv",
+        "image": "png",
         "document": "docx",
         "spreadsheet": "xlsx",
         "presentation": "pptx",
@@ -751,6 +754,143 @@ def create_convert_upload_job(
     )
 
 
+@app.post("/api/jobs/convert-batch")
+def create_convert_batch_jobs(
+    files: list[UploadFile] = File(...),
+    settings: str = Form(...),
+    preset: str = Form("default"),
+    compression_profile: str = Form("balanced"),
+    quality_preset: str | None = Form(None),
+    strip_metadata: bool = Form(True),
+    video_codec: str | None = Form(None),
+    audio_codec: str | None = Form(None),
+    audio_bitrate: str | None = Form(None),
+    sample_rate: str | None = Form(None),
+    audio_channels: str | None = Form(None),
+    crf: str | None = Form(None),
+    max_width: str | None = Form(None),
+    max_height: str | None = Form(None),
+    max_fps: str | None = Form(None),
+    image_quality: str | None = Form(None),
+    lang: str = Form("de"),
+    force: bool = False,
+    session: Session = Depends(get_session),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+    if len(files) > 100:
+        raise HTTPException(status_code=400, detail="A batch can contain at most 100 files")
+
+    try:
+        item_settings = json.loads(settings)
+    except (TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid batch settings")
+    if not isinstance(item_settings, list) or len(item_settings) != len(files):
+        raise HTTPException(status_code=400, detail="Batch settings must match the uploaded files")
+
+    normalized_items = []
+    for file, item in zip(files, item_settings):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="Invalid settings for a batch item")
+        options = normalize_convert_options(
+            file=file,
+            compression_family=item.get("compression_family"),
+            compression_profile=compression_profile,
+            output_format=item.get("output_format"),
+            quality_preset=quality_preset,
+            strip_metadata=strip_metadata,
+        )
+        input_obj = {
+            "source": "upload",
+            "preset": preset,
+            "source_family": options["source_family"],
+            "compression_family": options["family"],
+            "compression_profile": options["compression_profile"],
+            "quality_preset": options["quality_preset"],
+            "output_format": options["output_format"],
+            "strip_metadata": options["strip_metadata"],
+            "video_codec": optional_form_text(video_codec),
+            "audio_codec": optional_form_text(audio_codec),
+            "audio_bitrate": optional_form_text(audio_bitrate),
+            "sample_rate": optional_form_text(sample_rate),
+            "audio_channels": optional_form_text(audio_channels),
+            "crf": optional_form_text(crf),
+            "max_width": optional_form_text(max_width),
+            "max_height": optional_form_text(max_height),
+            "max_fps": optional_form_text(max_fps),
+            "image_quality": optional_form_text(image_quality),
+            "lang": lang,
+            "mime_type": file.content_type or f"{options['family']}/x-mediaforge",
+            "original_filename": file.filename,
+        }
+        validate_compression_warning(
+            payload={"type": "convert", "input": input_obj},
+            input_obj=input_obj,
+            username="local",
+            session=session,
+            force=force,
+            lang=lang,
+        )
+        normalized_items.append(input_obj)
+
+    batch_id = uuid.uuid4().hex
+    stored_paths: list[str] = []
+    try:
+        for file in files:
+            stored_paths.append(store_upload_file(file, get_upload_dir(), get_max_upload_bytes()))
+    except Exception:
+        for upload_path in stored_paths:
+            try:
+                os.remove(upload_path)
+            except OSError:
+                logger.exception("Failed to clean up batch upload %s", upload_path)
+        raise
+
+    jobs = []
+    try:
+        for input_obj, upload_path in zip(normalized_items, stored_paths):
+            input_obj["file_path"] = upload_path
+            input_obj["batch_id"] = batch_id
+            job = models.Job(type="convert", input=input_obj)
+            session.add(job)
+            jobs.append(job)
+        session.commit()
+        for job in jobs:
+            session.refresh(job)
+    except Exception:
+        session.rollback()
+        for upload_path in stored_paths:
+            try:
+                os.remove(upload_path)
+            except OSError:
+                logger.exception("Failed to clean up batch upload %s", upload_path)
+        raise
+
+    for job in jobs:
+        try:
+            dispatch_job(job)
+        except Exception:
+            logger.exception("Failed to dispatch worker task for batch job %s", job.id)
+
+    return {
+        "batch_id": batch_id,
+        "jobs": [
+            JobRead(
+                id=job.id,
+                type=job.type,
+                status=job.status,
+                progress=job.progress,
+                current_step=job.current_step,
+                output_path=job.output_path,
+                created_at=job.created_at,
+                finished_at=job.finished_at,
+                expires_at=job.expires_at,
+            )
+            for job in jobs
+        ],
+    }
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(
     job_id: int,
@@ -792,6 +932,66 @@ def download_job_output(
         output_path,
         media_type="application/octet-stream",
         filename=os.path.basename(output_path),
+    )
+
+
+@app.get("/api/batches/{batch_id}/download")
+def download_batch_output(
+    batch_id: str,
+    session: Session = Depends(get_session),
+):
+    if not batch_id or len(batch_id) > 64:
+        raise HTTPException(status_code=400, detail="Invalid batch ID")
+
+    expire_old_job_outputs(session)
+    jobs = [
+        job
+        for job in session.exec(select(models.Job)).all()
+        if isinstance(job.input, dict) and job.input.get("batch_id") == batch_id
+    ]
+    if not jobs:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if any(job.status in {"queued", "running"} for job in jobs):
+        raise HTTPException(status_code=409, detail="Batch is not finished")
+
+    output_dir = os.path.realpath(get_output_dir())
+    output_paths = []
+    for job in jobs:
+        if job.status != "success" or not job.output_path:
+            continue
+        output_path = os.path.realpath(job.output_path)
+        if output_path != output_dir and not output_path.startswith(output_dir + os.sep):
+            raise HTTPException(status_code=403, detail="Output path is outside the download directory")
+        if os.path.isfile(output_path):
+            output_paths.append(output_path)
+    if not output_paths:
+        raise HTTPException(status_code=404, detail="Batch has no finished output files")
+
+    archive = tempfile.NamedTemporaryFile(prefix="mediaforge-batch-", suffix=".zip", delete=False)
+    archive_path = archive.name
+    archive.close()
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            used_names: set[str] = set()
+            for output_path in output_paths:
+                name = os.path.basename(output_path)
+                if name in used_names:
+                    stem, extension = os.path.splitext(name)
+                    name = f"{stem}-{len(used_names) + 1}{extension}"
+                used_names.add(name)
+                bundle.write(output_path, arcname=name)
+    except Exception:
+        try:
+            os.remove(archive_path)
+        except OSError:
+            pass
+        raise
+
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=f"mediaforge-batch-{batch_id[:8]}.zip",
+        background=BackgroundTask(os.remove, archive_path),
     )
 
 

@@ -1,5 +1,6 @@
 ﻿from io import BytesIO
 from types import SimpleNamespace
+import json
 import sys
 import types
 
@@ -230,6 +231,88 @@ def test_create_convert_upload_job_stores_file_and_dispatches(monkeypatch, tmp_p
     stored_files = list(upload_dir.glob("*"))
     assert len(stored_files) == 1
     assert stored_files[0].read_bytes() == b"audio"
+
+
+def test_create_convert_batch_jobs_preserves_per_file_formats(monkeypatch, tmp_path):
+    engine = create_test_engine()
+    upload_dir = tmp_path / "uploads"
+    monkeypatch.setenv("DATA_UPLOAD_DIR", str(upload_dir))
+    monkeypatch.setenv("MAX_UPLOAD_BYTES", "1024")
+    monkeypatch.setenv("AUDIT_OVERRIDE_LOG", str(tmp_path / "audit.log"))
+    sent_jobs = []
+    monkeypatch.setattr(api_main, "dispatch_job", lambda job: sent_jobs.append(job.id))
+
+    files = [
+        fake_upload("clip.mp4", b"video", content_type="video/mp4"),
+        fake_upload("photo.jpg", b"image", content_type="image/jpeg"),
+        fake_upload("track.wav", b"audio", content_type="audio/wav"),
+    ]
+    settings = json.dumps(
+        [
+            {"compression_family": "video", "output_format": "mkv"},
+            {"compression_family": "image", "output_format": "png"},
+            {"compression_family": "audio", "output_format": "mp3"},
+        ]
+    )
+
+    with Session(engine) as session:
+        result = api_main.create_convert_batch_jobs(
+            files=files,
+            settings=settings,
+            preset="default",
+            compression_profile="balanced",
+            quality_preset="balanced",
+            strip_metadata=True,
+            lang="de",
+            force=True,
+            session=session,
+        )
+        saved = session.exec(select(Job)).all()
+
+    assert len(result["jobs"]) == 3
+    assert sent_jobs == [job.id for job in saved]
+    assert {job.input["batch_id"] for job in saved} == {result["batch_id"]}
+    assert [job.input["output_format"] for job in saved] == ["mkv", "png", "mp3"]
+    assert len(list(upload_dir.glob("*"))) == 3
+
+
+def test_default_convert_formats_are_mkv_png_and_mp3():
+    video = api_main.normalize_convert_options(
+        file=fake_upload("clip.avi", b"video", content_type="video/x-msvideo"),
+        compression_family="video",
+        compression_profile="balanced",
+        output_format=None,
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    image = api_main.normalize_convert_options(
+        file=fake_upload("photo.jpg", b"image", content_type="image/jpeg"),
+        compression_family="image",
+        compression_profile="balanced",
+        output_format=None,
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+    audio = api_main.normalize_convert_options(
+        file=fake_upload("track.wav", b"audio", content_type="audio/wav"),
+        compression_family="audio",
+        compression_profile="balanced",
+        output_format=None,
+        quality_preset="balanced",
+        strip_metadata=True,
+    )
+
+    assert video["output_format"] == "mkv"
+    assert image["output_format"] == "png"
+    assert audio["output_format"] == "mp3"
+
+
+def test_default_download_formats_are_mkv_and_mp3():
+    video = api_main.normalize_download_input({"url": "https://example.invalid/video", "output_kind": "video"})
+    audio = api_main.normalize_download_input({"url": "https://example.invalid/audio", "output_kind": "audio"})
+
+    assert video["output_format"] == "mkv"
+    assert audio["output_format"] == "mp3"
 
 
 def test_convert_options_reject_image_to_video():
