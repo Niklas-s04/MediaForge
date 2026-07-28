@@ -47,6 +47,7 @@ type OptionsResponse = {
   convert?: {
     formats?: Partial<Record<MediaFamily, string[]>>
   }
+  metadata_preservation?: Partial<Record<MediaFamily, string[]>>
 }
 
 type InspectInfo = {
@@ -76,6 +77,7 @@ type BatchFile = {
   sourceFamily: MediaFamily
   outputFamily: MediaFamily
   outputFormat: string
+  preserveMetadata: boolean
 }
 
 const terminalStatuses = ['success', 'failed', 'cancelled', 'expired', 'deleted', 'notfound']
@@ -192,6 +194,27 @@ const uploadExtensions: Record<MediaFamily, string[]> = {
 }
 
 const uploadAccept = mediaFamilies.flatMap((family) => uploadExtensions[family].map((ext) => `.${ext}`)).join(',')
+
+const defaultMetadataFormats: Partial<Record<MediaFamily, string[]>> = {
+  audio: ['mp3', 'm4a', 'opus', 'ogg', 'oga', 'weba', 'mka', 'wav', 'flac', 'aiff', 'alac', 'wma'],
+  video: ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi', 'mpg', 'mpeg', 'flv', 'wmv', 'ogv'],
+  image: ['webp', 'jpg', 'png', 'avif', 'gif', 'tiff'],
+}
+
+function metadataPreservationSupported(
+  sourceFamily: MediaFamily,
+  outputFamily: MediaFamily,
+  outputFormat: string,
+  supportedFormats: Partial<Record<MediaFamily, string[]>>,
+) {
+  if (sourceFamily === 'image') {
+    return outputFamily === 'image' && (supportedFormats.image || []).includes(outputFormat)
+  }
+  if (['audio', 'video'].includes(sourceFamily) && ['audio', 'video'].includes(outputFamily)) {
+    return (supportedFormats[outputFamily] || []).includes(outputFormat)
+  }
+  return false
+}
 
 const qualityOptions: { value: QualityPreset; label: string; text: string }[] = [
   { value: 'high', label: 'Originalnah', text: 'Mehr Qualität, größere Datei' },
@@ -563,8 +586,9 @@ function AdvancedOptions({
   family,
   values,
   setValues,
-  stripMetadata,
-  setStripMetadata,
+  preserveMetadata,
+  setPreserveMetadata,
+  showMetadataToggle = true,
   isDownload,
   downloadQuality,
   setDownloadQuality,
@@ -572,8 +596,9 @@ function AdvancedOptions({
   family: MediaFamily
   values: AdvancedValues
   setValues: React.Dispatch<React.SetStateAction<AdvancedValues>>
-  stripMetadata: boolean
-  setStripMetadata: (value: boolean) => void
+  preserveMetadata: boolean
+  setPreserveMetadata: (value: boolean) => void
+  showMetadataToggle?: boolean
   isDownload?: boolean
   downloadQuality?: string
   setDownloadQuality?: (value: string) => void
@@ -713,10 +738,12 @@ function AdvancedOptions({
         </>
       ) : null}
 
-      <label className="toggle-row">
-        <input type="checkbox" checked={stripMetadata} onChange={(event) => setStripMetadata(event.target.checked)} />
-        <span>Metadaten entfernen</span>
-      </label>
+      {showMetadataToggle ? (
+        <label className="toggle-row">
+          <input type="checkbox" checked={preserveMetadata} onChange={(event) => setPreserveMetadata(event.target.checked)} />
+          <span>Metadaten erhalten, soweit das Zielformat sie unterstützt</span>
+        </label>
+      ) : null}
     </div>
   )
 }
@@ -934,7 +961,7 @@ function JobDetail({
 function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [activeTab, setActiveTab] = useState<ActiveTab>('download')
+  const [activeTab, setActiveTab] = useState<ActiveTab>('convert')
   const [url, setUrl] = useState('')
   const [downloadFamily, setDownloadFamily] = useState<MediaFamily>('video')
   const [downloadFormat, setDownloadFormat] = useState('mkv')
@@ -943,23 +970,27 @@ function App() {
   const [downloadAdvanced, setDownloadAdvanced] = useState<AdvancedValues>(defaultAdvanced)
   const [downloadInfo, setDownloadInfo] = useState<InspectInfo | null>(null)
   const [isInspecting, setIsInspecting] = useState(false)
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark')
   const [message, setMessage] = useState<string | null>(null)
   const [convertFiles, setConvertFiles] = useState<BatchFile[]>([])
   const [batchId, setBatchId] = useState<string | null>(null)
   const [batchJobIds, setBatchJobIds] = useState<number[]>([])
   const [convertQualityPreset, setConvertQualityPreset] = useState<QualityPreset>('balanced')
   const [convertAdvanced, setConvertAdvanced] = useState<AdvancedValues>(defaultAdvanced)
-  const [stripMetadata, setStripMetadata] = useState(true)
+  const [preserveMetadata, setPreserveMetadata] = useState(true)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [pickerOpen, setPickerOpen] = useState<string | null>(null)
   const [compressionWarning, setCompressionWarning] = useState<string | null>(null)
   const [pendingWarning, setPendingWarning] = useState<string | null>(null)
   const [pendingDuplicateFiles, setPendingDuplicateFiles] = useState<BatchFile[]>([])
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyAction, setHistoryAction] = useState<'download' | 'delete' | null>(null)
+  const [pendingHistoryDelete, setPendingHistoryDelete] = useState(false)
   const [transfer, setTransfer] = useState<TransferState | null>(null)
   const [downloadCatalog, setDownloadCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
   const [convertCatalog, setConvertCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
+  const [metadataFormats, setMetadataFormats] = useState<Partial<Record<MediaFamily, string[]>>>(defaultMetadataFormats)
   const [now, setNow] = useState(Date.now())
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -975,6 +1006,12 @@ function App() {
   const batchSuccessCount = batchJobs.filter((job) => job.status === 'success' && job.output_path).length
   const activeQuality = activeTab === 'download' ? downloadQualityPreset : convertQualityPreset
   const activeWarningFamily = activeTab === 'download' ? downloadFamily : convertFamily
+  const downloadMetadataSupported = metadataPreservationSupported(
+    downloadFamily,
+    downloadFamily,
+    downloadFormat,
+    metadataFormats,
+  )
 
   const loadJobs = useCallback(async () => {
     try {
@@ -1000,6 +1037,7 @@ function App() {
       .then((data: OptionsResponse | null) => {
         setDownloadCatalog(buildCatalogFromOptions(data, 'download'))
         setConvertCatalog(buildCatalogFromOptions(data, 'convert'))
+        setMetadataFormats(data?.metadata_preservation || defaultMetadataFormats)
       })
       .catch(() => {
         setDownloadCatalog(formatCatalog)
@@ -1019,6 +1057,10 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    document.querySelector('meta[name="theme-color"]')?.setAttribute(
+      'content',
+      theme === 'dark' ? '#080d16' : '#f5f7fb',
+    )
   }, [theme])
 
   useEffect(() => {
@@ -1076,12 +1118,14 @@ function App() {
         incompatible.push(file.name)
         return
       }
+      const outputFormat = defaultFormatForFamily(source)
       compatible.push({
         id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
         file,
         sourceFamily: source,
         outputFamily: source,
-        outputFormat: defaultFormatForFamily(source),
+        outputFormat,
+        preserveMetadata: metadataPreservationSupported(source, source, outputFormat, metadataFormats),
       })
     })
 
@@ -1159,7 +1203,11 @@ function App() {
       quality_preset: downloadQualityPreset,
       compression_profile: downloadQualityPreset === 'small' ? 'small' : 'balanced',
       lang: 'de',
-      strip_metadata: stripMetadata,
+      original_filename: downloadInfo?.title
+        ? `${downloadInfo.title.replace(/[\\/]/g, '_')}.${downloadFormat}`
+        : undefined,
+      preserve_metadata: preserveMetadata,
+      strip_metadata: !preserveMetadata,
     }
     appendAdvanced(input, downloadAdvanced)
     const body = { type: 'download', input }
@@ -1215,11 +1263,12 @@ function App() {
     data.set('settings', JSON.stringify(convertFiles.map((item) => ({
       compression_family: item.outputFamily,
       output_format: item.outputFormat,
+      preserve_metadata: item.preserveMetadata,
     }))))
     data.set('preset', 'default')
     data.set('compression_profile', convertQualityPreset === 'small' ? 'small' : 'balanced')
     data.set('quality_preset', convertQualityPreset)
-    data.set('strip_metadata', stripMetadata ? 'true' : 'false')
+    data.set('strip_metadata', 'false')
     data.set('lang', 'de')
     appendAdvanced(data, convertAdvanced)
 
@@ -1313,7 +1362,8 @@ function App() {
       setMessage(null)
       const r = await fetch(`/api/batches/${encodeURIComponent(batchId)}/download`)
       if (!r.ok) {
-        setMessage(r.status === 409 ? 'Der Batch ist noch nicht vollständig abgeschlossen.' : 'ZIP-Download konnte nicht erstellt werden.')
+        const error = await r.json().catch(() => null)
+        setMessage(error?.detail || (r.status === 409 ? 'Der Batch ist noch nicht vollständig abgeschlossen.' : 'ZIP-Download konnte nicht erstellt werden.'))
         return
       }
       const blob = await r.blob()
@@ -1345,8 +1395,9 @@ function App() {
       })
       const r = await fetch(`/api/jobs/${job.id}/download`)
       if (!r.ok) {
+        const error = await r.json().catch(() => null)
         setTransfer(null)
-        setMessage('Datei ist noch nicht herunterladbar.')
+        setMessage(error?.detail || 'Datei ist noch nicht herunterladbar.')
         return
       }
       const totalHeader = r.headers.get('Content-Length')
@@ -1432,6 +1483,58 @@ function App() {
       setMessage(`Auftrag #${job.id} wurde gelöscht.`)
     } catch (e) {
       setMessage('Auftrag konnte nicht gelöscht werden.')
+    }
+  }
+
+  const downloadHistory = async () => {
+    if (!finishedJobs.length || historyAction) return
+    try {
+      setHistoryAction('download')
+      setMessage(null)
+      const r = await fetch('/api/history/download')
+      if (!r.ok) {
+        const error = await r.json().catch(() => null)
+        setMessage(error?.detail || 'Die Chronik konnte nicht als ZIP heruntergeladen werden.')
+        return
+      }
+      const blob = await r.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = filenameFromDisposition(r.headers.get('Content-Disposition')) || 'mediaforge-chronik.zip'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(objectUrl)
+      setMessage('Alle fertigen Dateien wurden als ZIP heruntergeladen.')
+    } catch (e) {
+      setMessage('Die Chronik konnte nicht als ZIP heruntergeladen werden.')
+    } finally {
+      setHistoryAction(null)
+    }
+  }
+
+  const deleteHistory = async () => {
+    if (!finishedJobs.length || historyAction) return
+    try {
+      setHistoryAction('delete')
+      setMessage(null)
+      const r = await fetch('/api/history', { method: 'DELETE' })
+      if (!r.ok) {
+        const error = await r.json().catch(() => null)
+        setMessage(error?.detail || 'Die Chronik konnte nicht gelöscht werden.')
+        return
+      }
+      const result = await r.json().catch(() => ({ deleted: finishedJobs.length }))
+      const finishedIds = new Set(finishedJobs.map((job) => job.id))
+      setJobs((current) => current.filter((job) => !finishedIds.has(job.id)))
+      setSelectedId((current) => (current !== null && finishedIds.has(current) ? null : current))
+      setPendingHistoryDelete(false)
+      setMessage(`${result.deleted ?? finishedIds.size} fertige Datei(en) wurden aus der Chronik gelöscht.`)
+    } catch (e) {
+      setMessage('Die Chronik konnte nicht gelöscht werden.')
+    } finally {
+      setHistoryAction(null)
     }
   }
 
@@ -1532,8 +1635,9 @@ function App() {
                       family={downloadFamily}
                       values={downloadAdvanced}
                       setValues={setDownloadAdvanced}
-                      stripMetadata={stripMetadata}
-                      setStripMetadata={setStripMetadata}
+                      preserveMetadata={preserveMetadata}
+                      setPreserveMetadata={setPreserveMetadata}
+                      showMetadataToggle={downloadMetadataSupported}
                       isDownload
                       downloadQuality={downloadQuality}
                       setDownloadQuality={setDownloadQuality}
@@ -1561,6 +1665,12 @@ function App() {
                     {convertFiles.map((item) => {
                       const itemCatalog = catalogForSource(convertCatalog, item.sourceFamily)
                       const pickerId = `convert-${item.id}`
+                      const canPreserveMetadata = metadataPreservationSupported(
+                        item.sourceFamily,
+                        item.outputFamily,
+                        item.outputFormat,
+                        metadataFormats,
+                      )
                       return (
                         <div className="batch-file-row" key={item.id}>
                           <div className="source-file">
@@ -1581,11 +1691,45 @@ function App() {
                               open={pickerOpen === pickerId}
                               onOpenChange={(open) => setPickerOpen(open ? pickerId : null)}
                               onSelect={(family, format) => {
-                                setConvertFiles((current) => current.map((candidate) => candidate.id === item.id
-                                  ? { ...candidate, outputFamily: family, outputFormat: format }
-                                  : candidate))
+                                setConvertFiles((current) => current.map((candidate) => {
+                                  if (candidate.id !== item.id) return candidate
+                                  const wasSupported = metadataPreservationSupported(
+                                    candidate.sourceFamily,
+                                    candidate.outputFamily,
+                                    candidate.outputFormat,
+                                    metadataFormats,
+                                  )
+                                  const nextSupported = metadataPreservationSupported(
+                                    candidate.sourceFamily,
+                                    family,
+                                    format,
+                                    metadataFormats,
+                                  )
+                                  return {
+                                    ...candidate,
+                                    outputFamily: family,
+                                    outputFormat: format,
+                                    preserveMetadata: nextSupported
+                                      ? (wasSupported ? candidate.preserveMetadata : true)
+                                      : false,
+                                  }
+                                }))
                               }}
                             />
+                            {canPreserveMetadata ? (
+                              <button
+                                className={`metadata-button ${item.preserveMetadata ? 'active' : ''}`}
+                                type="button"
+                                aria-pressed={item.preserveMetadata}
+                                onClick={() => setConvertFiles((current) => current.map((candidate) => candidate.id === item.id
+                                  ? { ...candidate, preserveMetadata: !candidate.preserveMetadata }
+                                  : candidate))}
+                              >
+                                {item.preserveMetadata ? 'Metadaten erhalten' : 'Metadaten entfernen'}
+                              </button>
+                            ) : (
+                              <span className="metadata-unavailable">Keine Metadatenübernahme</span>
+                            )}
                             <button
                               className="button ghost batch-remove"
                               type="button"
@@ -1615,8 +1759,9 @@ function App() {
                       family={convertFamily}
                       values={convertAdvanced}
                       setValues={setConvertAdvanced}
-                      stripMetadata={stripMetadata}
-                      setStripMetadata={setStripMetadata}
+                      preserveMetadata={preserveMetadata}
+                      setPreserveMetadata={setPreserveMetadata}
+                      showMetadataToggle={false}
                     />
                   ) : null}
                 </div>
@@ -1685,32 +1830,68 @@ function App() {
             )}
           </section>
 
-          <section className="panel downloads-panel">
-            <div className="panel-header compact">
-              <div>
-                <p className="eyebrow">Fertig</p>
-                <h2>Dateien</h2>
+          <section className={`panel downloads-panel ${historyOpen ? 'open' : ''}`}>
+            <button
+              className="history-toggle"
+              data-testid="history-toggle"
+              type="button"
+              aria-expanded={historyOpen}
+              aria-controls="finished-history"
+              onClick={() => setHistoryOpen((open) => !open)}
+            >
+              <span>
+                <span className="eyebrow">Chronik</span>
+                <strong>Fertige Dateien</strong>
+              </span>
+              <span className="history-summary">
+                <span className="count-label">{finishedJobs.length}</span>
+                <span className="history-chevron" aria-hidden="true">⌄</span>
+              </span>
+            </button>
+            {historyOpen ? (
+              <div className="history-content" id="finished-history">
+                {finishedJobs.length === 0 ? (
+                  <EmptyState title="Keine fertigen Dateien" text={`${activeJobs} Auftrag(e) laufen oder warten aktuell.`} />
+                ) : (
+                  <>
+                    <div className="history-actions">
+                      <button
+                        className="button secondary"
+                        data-testid="history-download-all"
+                        type="button"
+                        disabled={Boolean(historyAction)}
+                        onClick={downloadHistory}
+                      >
+                        {historyAction === 'download' ? 'ZIP wird erstellt…' : 'Alle herunterladen'}
+                      </button>
+                      <button
+                        className="button ghost history-delete-all"
+                        data-testid="history-delete-all"
+                        type="button"
+                        disabled={Boolean(historyAction)}
+                        onClick={() => setPendingHistoryDelete(true)}
+                      >
+                        Alle löschen
+                      </button>
+                    </div>
+                    <div className="download-list">
+                      {finishedJobs.map((job) => (
+                        <div className="download-row" key={job.id}>
+                          <span>
+                            <strong>{fallbackDownloadName(job)}</strong>
+                            <small>Auftrag #{job.id}</small>
+                            <small>{formatExpiry(job.expires_at, now)}</small>
+                          </span>
+                          <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
+                          <button className="button secondary" type="button" onClick={() => extendJob(job)}>Verlängern</button>
+                          <button className="button ghost" type="button" onClick={() => deleteJob(job)}>Löschen</button>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
-              <span className="count-label">{finishedJobs.length}</span>
-            </div>
-            {finishedJobs.length === 0 ? (
-              <EmptyState title="Keine fertigen Dateien" text={`${activeJobs} Auftrag(e) laufen oder warten aktuell.`} />
-            ) : (
-              <div className="download-list">
-                {finishedJobs.map((job) => (
-                  <div className="download-row" key={job.id}>
-                    <span>
-                      <strong>{fallbackDownloadName(job)}</strong>
-                      <small>Auftrag #{job.id}</small>
-                      <small>{formatExpiry(job.expires_at, now)}</small>
-                    </span>
-                    <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
-                    <button className="button secondary" type="button" onClick={() => extendJob(job)}>Verlängern</button>
-                    <button className="button ghost" type="button" onClick={() => deleteJob(job)}>Löschen</button>
-                  </div>
-                ))}
-              </div>
-            )}
+            ) : null}
           </section>
         </aside>
       </section>
@@ -1731,6 +1912,18 @@ function App() {
             ))}
           </ul>
           <p>Möchtest du die doppelten Dateien wirklich zusätzlich konvertieren?</p>
+        </Modal>
+      ) : null}
+      {pendingHistoryDelete ? (
+        <Modal
+          title="Chronik löschen"
+          onClose={() => setPendingHistoryDelete(false)}
+          onConfirm={deleteHistory}
+          cancelLabel="Abbrechen"
+          confirmLabel={historyAction === 'delete' ? 'Wird gelöscht…' : 'Alle löschen'}
+        >
+          <p>Alle <strong>{finishedJobs.length} fertigen Dateien</strong> werden vom Server gelöscht.</p>
+          <p>Dieser Vorgang kann nicht rückgängig gemacht werden.</p>
         </Modal>
       ) : null}
     </main>

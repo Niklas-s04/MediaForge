@@ -11,12 +11,15 @@ The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it 
 - Download online media and convert it to common audio or video formats.
 - Convert multiple uploaded audio, video, image, PDF, Office and OpenDocument files in one batch.
 - Choose the target format separately for every file, download results individually or bundle a completed batch as ZIP.
+- Preserve or remove metadata separately for each file when the selected source/target combination supports it.
+- Keep the original base filename for converted results; collisions use ` (2)`, ` (3)` and so on instead of job IDs.
 - Choose quality presets, target format and advanced codec settings.
 - Stream job progress and logs with Server-Sent Events.
 - Keep generated output files for 24 hours by default, show a live deletion timer and delete them automatically to save storage.
 - Extend individual finished jobs by 24 hours or delete them manually before expiry.
 - Hide expired and manually deleted jobs from the frontend job lists.
 - Remove uploaded source files after processing.
+- Scan uploaded files, remote downloads and converted outputs with ClamAV before processing or release.
 
 The default output formats are MKV for video, PNG for images and MP3 for audio.
 
@@ -73,7 +76,7 @@ PDF files can be exported to image formats as a ZIP with one image per page; ima
 ## Requirements
 
 - Docker Desktop or Docker Engine with Docker Compose
-- Node.js 18+ for frontend development
+- Node.js 20.19+ for frontend development
 - Python 3.11 for backend and worker tests
 
 ## Quick Start
@@ -89,6 +92,9 @@ Build and start the stack:
 ```powershell
 docker compose -f docker/docker-compose.yml up -d --build
 ```
+
+The first start can take several minutes while ClamAV downloads its signature
+database. The API starts only after the scanner reports healthy.
 
 Open the app:
 
@@ -114,6 +120,7 @@ Important environment variables:
 
 ```text
 API_PORT=8787
+API_BIND_ADDRESS=127.0.0.1
 TZ=Europe/Berlin
 WORKER_CONCURRENCY=2
 DATABASE_URL=sqlite:////data/db.sqlite3
@@ -122,9 +129,16 @@ DATA_LOG_DIR=/data/logs
 DATA_UPLOAD_DIR=/data/uploads
 DATA_OUTPUT_DIR=/data/output
 MAX_UPLOAD_BYTES=2147483648
+REMOTE_DOWNLOAD_MAX_BYTES=2147483648
 OUTPUT_RETENTION_HOURS=24
 OUTPUT_CLEANUP_INTERVAL_SECONDS=3600
 DOCUMENT_CONVERT_TIMEOUT_SECONDS=120
+MALWARE_SCAN_ENABLED=true
+CLAMAV_TIMEOUT_SECONDS=330
+CLAMAV_RETRIES=2
+MALWARE_SCAN_MAX_BYTES=2147483648
+CLAMAV_MEMORY_LIMIT=3g
+CLAMAV_CPUS=2.0
 ```
 
 `OUTPUT_RETENTION_HOURS` controls how long successful output files remain downloadable. The default is 24 hours.
@@ -134,6 +148,90 @@ DOCUMENT_CONVERT_TIMEOUT_SECONDS=120
 `DOCUMENT_CONVERT_TIMEOUT_SECONDS` controls the LibreOffice/Poppler conversion timeout for uploaded document jobs.
 
 Runtime files are stored in the root `data/` directory locally and mounted as `/data` inside the containers. The database, logs, uploads, temporary processing files, generated output and archives belong there and are ignored by Git.
+
+## Malware protection and containment
+
+Malware scanning is fail-closed and enabled by default:
+
+- Uploads are streamed to ClamAV before a job is created.
+- The worker scans again immediately before passing a file to ffmpeg, LibreOffice, Poppler or another converter.
+- Remotely downloaded files are scanned before conversion.
+- Remote URLs are limited to HTTP(S), reject credentials and local/non-public
+  destinations, and downloads stop at `REMOTE_DOWNLOAD_MAX_BYTES`.
+- Converted files are scanned before a job is marked successful and again immediately before an individual or ZIP download.
+- Detected, encrypted or incompletely scanned files are blocked. If the scanner is unavailable, uploads and downloads return `503` instead of bypassing the check.
+- ClamAV receives files through its `INSTREAM` protocol and has no mount of the MediaForge data directory.
+
+The ClamAV port is available only on the private Compose network and must never
+be published on the NAS. Its TCP protocol has no authentication or encryption.
+`MALWARE_SCAN_ENABLED=false` is intended only for isolated development and
+must not be used in production.
+
+Compose binds the web port to `127.0.0.1` by default. Keep that setting for a
+reverse proxy on the NAS. For direct trusted-LAN access, set
+`API_BIND_ADDRESS` to the NAS's specific LAN address and restrict it with the
+firewall; avoid `0.0.0.0`.
+
+Antivirus signatures cannot guarantee that a file is harmless. MediaForge also
+runs API and worker processes as UID/GID `10001`, removes Linux capabilities,
+uses a read-only container root filesystem and gives temporary directories
+`noexec`, `nosuid` and `nodev` mount options. Keep the stack and its base images
+updated because media parsers remain an important attack surface.
+
+The URL check is a defense-in-depth SSRF control, not a substitute for egress
+filtering: redirects and DNS behavior are ultimately handled by yt-dlp. Where
+possible, use NAS/firewall rules that prevent the worker network from reaching
+management interfaces and unrelated private subnets.
+
+## TrueNAS SCALE deployment
+
+Use a dedicated dataset such as `/mnt/SSD/apps/mediaforge/source/data` for
+MediaForge. Do not expose this dataset as an SMB/NFS share and do not mount
+other NAS datasets into the worker or ClamAV container. Before the first start,
+or once when upgrading from the former root-running images, create the runtime
+directories and assign them to the fixed container identity:
+
+```bash
+cd /mnt/SSD/apps/mediaforge/source
+sudo install -d -o 10001 -g 10001 -m 0750 \
+  data data/uploads data/output data/logs data/tmp
+sudo chown -R 10001:10001 data
+```
+
+Build all three local images:
+
+```bash
+cd /mnt/SSD/apps/mediaforge/source
+sudo git pull --ff-only
+sudo docker build --no-cache -f apps/api/Dockerfile -t mediaforge-api:local .
+sudo docker build --no-cache -f apps/worker/Dockerfile -t mediaforge-worker:local .
+sudo docker build --no-cache -f docker/clamav/Dockerfile -t mediaforge-clamav:local docker/clamav
+```
+
+For a Compose/YAML installation, validate and recreate the stack:
+
+```bash
+sudo docker compose -f docker/docker-compose.yml config
+sudo docker compose -f docker/docker-compose.yml up -d --force-recreate
+sudo docker compose -f docker/docker-compose.yml ps
+curl --fail http://127.0.0.1:8787/health
+```
+
+Expected health output contains `"malware_scanner":"ready"`. Do not remove the
+`clamav-db` volume on normal upgrades; it stores the current signature database.
+The service intentionally publishes no port for ClamAV or Redis.
+
+On TrueNAS, additionally:
+
+- expose the web app only through a VPN or an authenticated, TLS-enabled reverse proxy; the application itself is not an Internet-facing identity provider
+- restrict the host port with firewall rules to trusted networks
+- enable TrueNAS two-factor authentication and use a non-root administrative account
+- configure frequent periodic snapshots and replication for the dedicated app dataset
+- set a dataset quota so oversized uploads or conversion output cannot fill the NAS
+- keep SMB1 and NTLMv1 disabled and avoid sharing the application dataset
+
+See [docs/security-hardening/implementation-plan.md](docs/security-hardening/implementation-plan.md)
+for rollout, verification and rollback details.
 
 ## Data Retention
 
@@ -186,7 +284,7 @@ Checks before deployment:
 
 ```powershell
 docker compose -f docker/docker-compose.yml config
-docker compose -f docker/docker-compose.yml build api worker
+docker compose -f docker/docker-compose.yml build api worker clamav
 ```
 
 ## Release Checklist

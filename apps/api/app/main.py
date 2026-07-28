@@ -1,6 +1,7 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from .db import create_db_and_tables, engine, get_session
@@ -26,9 +27,24 @@ from .compression_goals import (
     summarize_profile_warning,
 )
 from .audit import audit_override
+from .network_security import RemoteUrlPolicyError, validate_remote_url
+from .malware_scan import (
+    MalwareDetectedError,
+    MalwareScanPolicyError,
+    MalwareScannerUnavailableError,
+    malware_scanning_enabled,
+    ping_malware_scanner,
+    scan_file,
+)
 
 
-app = FastAPI(title="MediaForge API")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    on_startup()
+    yield
+
+
+app = FastAPI(title="MediaForge API", lifespan=lifespan)
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +61,11 @@ CONVERT_FORMATS = {
     "presentation": {"pptx", "ppt", "odp", "html", "pdf"},
     "pdf": {"pdf", "txt"},
     "text": {"txt", "html", "pdf", "docx", "odt", "rtf"},
+}
+METADATA_PRESERVATION_FORMATS = {
+    "audio": {"mp3", "m4a", "opus", "ogg", "oga", "weba", "mka", "wav", "flac", "aiff", "alac", "wma"},
+    "video": {"mp4", "webm", "mkv", "mov", "m4v", "avi", "mpg", "mpeg", "flv", "wmv", "ogv"},
+    "image": {"webp", "jpg", "png", "avif", "gif", "tiff"},
 }
 FORMAT_ALIASES = {
     "audio": {
@@ -322,6 +343,85 @@ def store_upload_file(file: UploadFile, upload_dir: str, max_bytes: int) -> str:
     return upload_path
 
 
+def scan_uploaded_file_or_raise(upload_path: str, original_filename: str | None):
+    try:
+        scan_file(upload_path)
+    except MalwareDetectedError as exc:
+        logger.warning("Malware blocked in upload %r: %s", original_filename, exc.signature)
+        try:
+            os.remove(upload_path)
+        except OSError:
+            logger.exception("Failed to remove malware upload %s", upload_path)
+        raise HTTPException(status_code=422, detail="Die Datei wurde durch den Malware-Schutz blockiert.")
+    except MalwareScanPolicyError:
+        logger.warning("Upload %r rejected by malware scanning policy", original_filename)
+        try:
+            os.remove(upload_path)
+        except OSError:
+            logger.exception("Failed to remove policy-rejected upload %s", upload_path)
+        raise HTTPException(status_code=422, detail="Die Datei konnte nicht vollständig auf Malware geprüft werden.")
+    except MalwareScannerUnavailableError:
+        logger.error("Malware scanner unavailable while checking upload %r", original_filename)
+        try:
+            os.remove(upload_path)
+        except OSError:
+            logger.exception("Failed to remove unscanned upload %s", upload_path)
+        raise HTTPException(status_code=503, detail="Der Malware-Scanner ist vorübergehend nicht verfügbar.")
+
+
+def scan_job_output_or_raise(job: models.Job, session: Session):
+    output_path = job.output_path
+    try:
+        scan_file(output_path)
+        return
+    except MalwareScannerUnavailableError:
+        logger.error("Malware scanner unavailable while checking output for job %s", job.id)
+        raise HTTPException(status_code=503, detail="Der Malware-Scanner ist vorübergehend nicht verfügbar.")
+    except MalwareDetectedError as exc:
+        logger.warning("Malware blocked in output for job %s: %s", job.id, exc.signature)
+        detail = "Die Ausgabedatei wurde durch den Malware-Schutz blockiert."
+        error_code = "malware_detected"
+    except MalwareScanPolicyError:
+        logger.warning("Output for job %s rejected by malware scanning policy", job.id)
+        detail = "Die Ausgabedatei konnte nicht vollständig auf Malware geprüft werden."
+        error_code = "malware_scan_policy_rejected"
+
+    remove_output_file(output_path)
+    job.status = "failed"
+    job.output_path = None
+    job.error_message = error_code
+    job.current_step = "Durch Malware-Schutz blockiert"
+    job.finished_at = datetime.utcnow()
+    session.add(job)
+    session.commit()
+    raise HTTPException(status_code=422, detail=detail)
+
+
+def scan_transient_archive_or_raise(archive_path: str):
+    try:
+        scan_file(archive_path)
+    except MalwareDetectedError as exc:
+        logger.warning("Malware blocked in generated batch archive: %s", exc.signature)
+        detail = "Das ZIP-Archiv wurde durch den Malware-Schutz blockiert."
+        status_code = 422
+    except MalwareScanPolicyError:
+        logger.warning("Generated batch archive rejected by malware scanning policy")
+        detail = "Das ZIP-Archiv konnte nicht vollständig auf Malware geprüft werden."
+        status_code = 422
+    except MalwareScannerUnavailableError:
+        logger.error("Malware scanner unavailable while checking generated batch archive")
+        detail = "Der Malware-Scanner ist vorübergehend nicht verfügbar."
+        status_code = 503
+    else:
+        return
+
+    try:
+        os.remove(archive_path)
+    except OSError:
+        logger.exception("Failed to remove rejected batch archive %s", archive_path)
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
 def infer_file_name_or_ext(input_obj: dict) -> str | None:
     file_name_or_ext = input_obj.get("file_name") or input_obj.get("original_filename")
     if file_name_or_ext:
@@ -348,6 +448,14 @@ def quality_to_warning_profile(quality_preset: str | None) -> str:
     return "small" if quality_preset == "small" else "balanced"
 
 
+def metadata_preservation_supported(source_family: str, output_family: str, output_format: str) -> bool:
+    if source_family == "image":
+        return output_family == "image" and output_format in METADATA_PRESERVATION_FORMATS["image"]
+    if source_family in {"audio", "video"} and output_family in {"audio", "video"}:
+        return output_format in METADATA_PRESERVATION_FORMATS[output_family]
+    return False
+
+
 def infer_family_from_upload(file: UploadFile, fallback: str | None = None) -> str:
     ext = upload_extension(file.filename)
     if ext:
@@ -365,6 +473,10 @@ def infer_family_from_upload(file: UploadFile, fallback: str | None = None) -> s
 
 def normalize_download_input(input_obj: dict) -> dict:
     normalized = dict(input_obj or {})
+    try:
+        normalized["url"] = validate_remote_url(normalized.get("url"), resolve=False)
+    except RemoteUrlPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     output_kind = normalized.get("output_kind") or normalized.get("media_mode") or "audio"
     output_kind = str(output_kind).lower()
     if output_kind not in DOWNLOAD_FORMATS:
@@ -386,11 +498,22 @@ def normalize_download_input(input_obj: dict) -> dict:
     if download_quality not in DOWNLOAD_QUALITIES:
         raise HTTPException(status_code=400, detail=f"Unsupported download quality '{download_quality}'")
 
+    metadata_supported = metadata_preservation_supported(output_kind, output_kind, output_format)
+    if "preserve_metadata" in normalized:
+        requested_preserve_metadata = bool(normalized.get("preserve_metadata"))
+    elif "strip_metadata" in normalized:
+        requested_preserve_metadata = not bool(normalized.get("strip_metadata"))
+    else:
+        requested_preserve_metadata = True
+    preserve_metadata = metadata_supported and requested_preserve_metadata
+
     normalized["output_kind"] = output_kind
     normalized["output_format"] = output_format
     normalized["quality_preset"] = quality_preset
     normalized["download_quality"] = download_quality
-    normalized["strip_metadata"] = bool(normalized.get("strip_metadata", True))
+    normalized["metadata_preservation_supported"] = metadata_supported
+    normalized["preserve_metadata"] = preserve_metadata
+    normalized["strip_metadata"] = metadata_supported and not preserve_metadata
     normalized["compression_profile"] = quality_to_warning_profile(quality_preset)
     normalized["lang"] = normalized.get("lang") or "de"
     normalized["mime_type"] = f"{output_kind}/x-mediaforge"
@@ -405,6 +528,7 @@ def normalize_convert_options(
     output_format: str | None,
     quality_preset: str | None,
     strip_metadata: bool,
+    preserve_metadata: bool | None = None,
 ) -> dict:
     source_family = infer_family_from_upload(file, compression_family)
     requested_family = compression_family if isinstance(compression_family, str) else None
@@ -436,7 +560,11 @@ def normalize_convert_options(
     requested_quality = quality_preset if isinstance(quality_preset, str) else None
     requested_profile = compression_profile if isinstance(compression_profile, str) else None
     requested_format = output_format if isinstance(output_format, str) else None
-    effective_strip_metadata = strip_metadata if isinstance(strip_metadata, bool) else True
+    requested_preserve_metadata = (
+        preserve_metadata
+        if isinstance(preserve_metadata, bool)
+        else not (strip_metadata if isinstance(strip_metadata, bool) else False)
+    )
     effective_quality = str(requested_quality or requested_profile or "balanced").lower()
     if effective_quality not in QUALITY_PRESETS:
         raise HTTPException(status_code=400, detail=f"Unsupported quality preset '{effective_quality}'")
@@ -463,13 +591,18 @@ def normalize_convert_options(
             detail=f"Unsupported image to PDF conversion format '{effective_format}'",
         )
 
+    metadata_supported = metadata_preservation_supported(source_family, output_family, effective_format)
+    effective_preserve_metadata = metadata_supported and requested_preserve_metadata
+
     return {
         "source_family": source_family,
         "family": output_family,
         "output_format": effective_format,
         "quality_preset": effective_quality,
         "compression_profile": quality_to_warning_profile(effective_quality),
-        "strip_metadata": effective_strip_metadata,
+        "metadata_preservation_supported": metadata_supported,
+        "preserve_metadata": effective_preserve_metadata,
+        "strip_metadata": metadata_supported and not effective_preserve_metadata,
     }
 
 
@@ -575,7 +708,6 @@ def dispatch_job(job: models.Job):
         raise HTTPException(status_code=400, detail=f"Unsupported job type '{job.type}'")
 
 
-@app.on_event("startup")
 def on_startup():
     create_db_and_tables()
     ensure_job_retention_columns()
@@ -585,7 +717,17 @@ def on_startup():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    enabled = malware_scanning_enabled()
+    ready = ping_malware_scanner()
+    if enabled and not ready:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "malware_scanner": "unavailable"},
+        )
+    return {
+        "status": "ok",
+        "malware_scanner": "ready" if enabled else "disabled",
+    }
 
 
 def frontend_static_file(filename: str, media_type: str):
@@ -670,7 +812,8 @@ def create_convert_upload_job(
     compression_profile: str = Form("balanced"),
     output_format: str | None = Form(None),
     quality_preset: str | None = Form(None),
-    strip_metadata: bool = Form(True),
+    strip_metadata: bool = Form(False),
+    preserve_metadata: bool | None = Form(None),
     video_codec: str | None = Form(None),
     audio_codec: str | None = Form(None),
     audio_bitrate: str | None = Form(None),
@@ -692,6 +835,7 @@ def create_convert_upload_job(
         output_format=output_format,
         quality_preset=quality_preset,
         strip_metadata=strip_metadata,
+        preserve_metadata=preserve_metadata,
     )
     input_obj = {
         "source": "upload",
@@ -701,6 +845,8 @@ def create_convert_upload_job(
         "compression_profile": options["compression_profile"],
         "quality_preset": options["quality_preset"],
         "output_format": options["output_format"],
+        "metadata_preservation_supported": options["metadata_preservation_supported"],
+        "preserve_metadata": options["preserve_metadata"],
         "strip_metadata": options["strip_metadata"],
         "video_codec": optional_form_text(video_codec),
         "audio_codec": optional_form_text(audio_codec),
@@ -733,6 +879,7 @@ def create_convert_upload_job(
         logger.exception("Unexpected compression validation error")
 
     upload_path = store_upload_file(file, get_upload_dir(), get_max_upload_bytes())
+    scan_uploaded_file_or_raise(upload_path, file.filename)
     input_obj["file_path"] = upload_path
     job = crud.create_job(session, "convert", input_obj)
 
@@ -761,7 +908,7 @@ def create_convert_batch_jobs(
     preset: str = Form("default"),
     compression_profile: str = Form("balanced"),
     quality_preset: str | None = Form(None),
-    strip_metadata: bool = Form(True),
+    strip_metadata: bool = Form(False),
     video_codec: str | None = Form(None),
     audio_codec: str | None = Form(None),
     audio_bitrate: str | None = Form(None),
@@ -792,6 +939,7 @@ def create_convert_batch_jobs(
     for file, item in zip(files, item_settings):
         if not isinstance(item, dict):
             raise HTTPException(status_code=400, detail="Invalid settings for a batch item")
+        item_preserve_metadata = item.get("preserve_metadata")
         options = normalize_convert_options(
             file=file,
             compression_family=item.get("compression_family"),
@@ -799,6 +947,7 @@ def create_convert_batch_jobs(
             output_format=item.get("output_format"),
             quality_preset=quality_preset,
             strip_metadata=strip_metadata,
+            preserve_metadata=item_preserve_metadata if isinstance(item_preserve_metadata, bool) else None,
         )
         input_obj = {
             "source": "upload",
@@ -808,6 +957,8 @@ def create_convert_batch_jobs(
             "compression_profile": options["compression_profile"],
             "quality_preset": options["quality_preset"],
             "output_format": options["output_format"],
+            "metadata_preservation_supported": options["metadata_preservation_supported"],
+            "preserve_metadata": options["preserve_metadata"],
             "strip_metadata": options["strip_metadata"],
             "video_codec": optional_form_text(video_codec),
             "audio_codec": optional_form_text(audio_codec),
@@ -838,10 +989,13 @@ def create_convert_batch_jobs(
     try:
         for file in files:
             stored_paths.append(store_upload_file(file, get_upload_dir(), get_max_upload_bytes()))
+        for file, upload_path in zip(files, stored_paths):
+            scan_uploaded_file_or_raise(upload_path, file.filename)
     except Exception:
         for upload_path in stored_paths:
             try:
-                os.remove(upload_path)
+                if os.path.exists(upload_path):
+                    os.remove(upload_path)
             except OSError:
                 logger.exception("Failed to clean up batch upload %s", upload_path)
         raise
@@ -861,7 +1015,8 @@ def create_convert_batch_jobs(
         session.rollback()
         for upload_path in stored_paths:
             try:
-                os.remove(upload_path)
+                if os.path.exists(upload_path):
+                    os.remove(upload_path)
             except OSError:
                 logger.exception("Failed to clean up batch upload %s", upload_path)
         raise
@@ -928,11 +1083,111 @@ def download_job_output(
     if not os.path.exists(output_path) or not os.path.isfile(output_path):
         raise HTTPException(status_code=404, detail="Output file not found")
 
+    scan_job_output_or_raise(job, session)
+
     return FileResponse(
         output_path,
         media_type="application/octet-stream",
         filename=os.path.basename(output_path),
     )
+
+
+@app.get("/api/history/download")
+def download_history_output(
+    session: Session = Depends(get_session),
+):
+    expire_old_job_outputs(session)
+    jobs = session.exec(
+        select(models.Job)
+        .where(
+            models.Job.status == "success",
+            models.Job.output_path.is_not(None),
+        )
+        .order_by(models.Job.created_at.desc())
+    ).all()
+
+    output_dir = os.path.realpath(get_output_dir())
+    output_paths: list[str] = []
+    for job in jobs:
+        output_path = os.path.realpath(job.output_path)
+        if not is_path_inside(output_dir, output_path):
+            raise HTTPException(status_code=403, detail="Output path is outside the download directory")
+        if not os.path.isfile(output_path):
+            continue
+        scan_job_output_or_raise(job, session)
+        output_paths.append(output_path)
+    if not output_paths:
+        raise HTTPException(status_code=404, detail="History has no finished output files")
+
+    archive = tempfile.NamedTemporaryFile(
+        prefix="mediaforge-history-",
+        suffix=".zip",
+        dir=output_dir,
+        delete=False,
+    )
+    archive_path = archive.name
+    archive.close()
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            used_names: set[str] = set()
+            for output_path in output_paths:
+                original_name = os.path.basename(output_path)
+                name = original_name
+                stem, extension = os.path.splitext(original_name)
+                copy_number = 2
+                while name.casefold() in used_names:
+                    name = f"{stem} ({copy_number}){extension}"
+                    copy_number += 1
+                used_names.add(name.casefold())
+                bundle.write(output_path, arcname=name)
+    except Exception:
+        try:
+            os.remove(archive_path)
+        except OSError:
+            pass
+        raise
+
+    scan_transient_archive_or_raise(archive_path)
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=f"mediaforge-chronik-{timestamp}.zip",
+        background=BackgroundTask(os.remove, archive_path),
+    )
+
+
+@app.delete("/api/history")
+def delete_history_outputs(
+    session: Session = Depends(get_session),
+):
+    expire_old_job_outputs(session)
+    jobs = session.exec(
+        select(models.Job).where(
+            models.Job.status == "success",
+            models.Job.output_path.is_not(None),
+        )
+    ).all()
+    if not jobs:
+        return {"deleted": 0}
+
+    output_dir = os.path.realpath(get_output_dir())
+    for job in jobs:
+        if job.output_path and not is_path_inside(output_dir, job.output_path):
+            raise HTTPException(status_code=403, detail="Output path is outside the download directory")
+
+    deleted_at = datetime.utcnow()
+    for job in jobs:
+        if not remove_output_file(job.output_path):
+            raise HTTPException(status_code=500, detail="One or more output files could not be deleted")
+        job.status = "deleted"
+        job.output_path = None
+        job.current_step = "Chronik manuell geloescht"
+        job.deleted_at = deleted_at
+        session.add(job)
+
+    session.commit()
+    return {"deleted": len(jobs)}
 
 
 @app.get("/api/batches/{batch_id}/download")
@@ -963,11 +1218,17 @@ def download_batch_output(
         if output_path != output_dir and not output_path.startswith(output_dir + os.sep):
             raise HTTPException(status_code=403, detail="Output path is outside the download directory")
         if os.path.isfile(output_path):
+            scan_job_output_or_raise(job, session)
             output_paths.append(output_path)
     if not output_paths:
         raise HTTPException(status_code=404, detail="Batch has no finished output files")
 
-    archive = tempfile.NamedTemporaryFile(prefix="mediaforge-batch-", suffix=".zip", delete=False)
+    archive = tempfile.NamedTemporaryFile(
+        prefix="mediaforge-batch-",
+        suffix=".zip",
+        dir=output_dir,
+        delete=False,
+    )
     archive_path = archive.name
     archive.close()
     try:
@@ -986,6 +1247,8 @@ def download_batch_output(
         except OSError:
             pass
         raise
+
+    scan_transient_archive_or_raise(archive_path)
 
     return FileResponse(
         archive_path,
@@ -1135,6 +1398,10 @@ def get_media_options():
             "formats": {key: sorted(value) for key, value in CONVERT_FORMATS.items()},
             "quality_presets": sorted(QUALITY_PRESETS),
         },
+        "metadata_preservation": {
+            key: sorted(value)
+            for key, value in METADATA_PRESERVATION_FORMATS.items()
+        },
     }
 
 
@@ -1145,6 +1412,10 @@ def inspect_download(
     url = req.url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
+    try:
+        url = validate_remote_url(url, resolve=True)
+    except RemoteUrlPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     try:
         import yt_dlp
 
@@ -1165,7 +1436,7 @@ def inspect_download(
     except HTTPException:
         raise
     except Exception as e:
-        logger.info("Download inspection failed for %s: %s", url, e)
+        logger.info("Download inspection failed: %s", e)
         raise HTTPException(status_code=400, detail="Download analysis failed")
 
 

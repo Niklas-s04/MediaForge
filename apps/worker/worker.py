@@ -14,6 +14,13 @@ import re
 import tempfile
 import zipfile
 from apps.api.app.compression_goals import resolve_compression_family, get_compression_profile
+from apps.api.app.network_security import RemoteUrlPolicyError, validate_remote_url
+from apps.api.app.malware_scan import (
+    MalwareDetectedError,
+    MalwareScanPolicyError,
+    MalwareScannerUnavailableError,
+    scan_file,
+)
 from apps.api.app.models import Flow, FlowRun, Job
 
 redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
@@ -101,6 +108,12 @@ FORMAT_CODECS = {
 }
 _PROGRESS_WRITE_STATE: dict[int, dict[str, float | int]] = {}
 _FFMPEG_ENCODERS: set[str] | None | bool = None
+
+
+class RemoteDownloadTooLargeError(RuntimeError):
+    pass
+
+
 VIDEO_QUALITY = {
     "high": {"crf": 20, "max_width": None, "max_fps": None},
     "balanced": {"crf": 24, "max_width": 1920, "max_fps": 30},
@@ -191,10 +204,74 @@ def _remove_upload_source(path: str | None):
         logging.exception("Failed to remove uploaded source file %s", path)
 
 
+def _remove_rejected_file(path: str | None):
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        logging.exception("Failed to remove rejected file %s", path)
+
+
+def _scan_job_file(session: Session, job: Job, path: str, stage: str) -> bool:
+    try:
+        scan_file(path)
+        _log(job.id, f"Malware scan passed: {stage}")
+        return True
+    except MalwareDetectedError as exc:
+        error_code = "malware_detected"
+        _log(job.id, f"Malware blocked during {stage}: {exc.signature}")
+    except MalwareScanPolicyError:
+        error_code = "malware_scan_policy_rejected"
+        _log(job.id, f"Malware scan policy rejected file during {stage}")
+    except MalwareScannerUnavailableError:
+        error_code = "malware_scanner_unavailable"
+        _log(job.id, f"Malware scanner unavailable during {stage}")
+
+    _remove_rejected_file(path)
+    job.status = "failed"
+    job.output_path = None
+    job.error_message = error_code
+    job.current_step = "Durch Malware-Schutz blockiert"
+    job.finished_at = datetime.datetime.utcnow()
+    session.add(job)
+    session.commit()
+    return False
+
+
 def _safe_stem(path: str | None, fallback: str) -> str:
     stem = os.path.splitext(os.path.basename(path or ""))[0] or fallback
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem)
-    return cleaned.strip("._") or fallback
+    candidate = cleaned.strip("._") or fallback
+    return candidate.encode("utf-8")[:180].decode("utf-8", errors="ignore").rstrip("._") or fallback
+
+
+def _working_output_path(output_dir: str, job_id: int, extension: str) -> str:
+    return os.path.join(output_dir, f".mediaforge-job-{job_id}.partial.{extension}")
+
+
+def _publish_output(source_path: str, output_dir: str, stem: str, extension: str) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    for index in range(1, 10001):
+        suffix = "" if index == 1 else f" ({index})"
+        target_path = os.path.join(output_dir, f"{stem}{suffix}.{extension}")
+        try:
+            os.link(source_path, target_path)
+        except FileExistsError:
+            continue
+        try:
+            os.remove(source_path)
+        except Exception:
+            _remove_rejected_file(target_path)
+            raise
+        return target_path
+    raise RuntimeError("Could not reserve a unique output filename")
+
+
+def _cleanup_job_output_partials(output_dir: str, job_id: int):
+    for partial_path in glob.glob(os.path.join(output_dir, f".mediaforge-job-{job_id}.partial.*")):
+        _remove_rejected_file(partial_path)
 
 
 def _profile_output_ext(family: str | None, profile: dict) -> str:
@@ -470,7 +547,21 @@ def _download_with_ytdlp(
     retries: int,
     download_timeout: int | float,
 ):
+    max_bytes = _int_option(
+        os.environ.get("REMOTE_DOWNLOAD_MAX_BYTES"),
+        2147483648,
+        minimum=1,
+        maximum=1099511627776,
+    )
+    rejected_for_size = False
+
     def progress_hook(data: dict):
+        nonlocal rejected_for_size
+        downloaded = int(data.get("downloaded_bytes") or 0)
+        total = int(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
+        if downloaded > max_bytes or total > max_bytes:
+            rejected_for_size = True
+            raise RemoteDownloadTooLargeError("remote download exceeds configured maximum")
         progress, step = _download_progress_from_hook(data, attempt, retries)
         _set_job_progress(session, job, progress, step)
 
@@ -482,15 +573,26 @@ def _download_with_ytdlp(
         "no_warnings": True,
         "retries": retries,
         "socket_timeout": download_timeout,
+        "max_filesize": max_bytes,
         "progress_hooks": [progress_hook],
     }
-    with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.download([input_url])
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([input_url])
+    except Exception as exc:
+        if rejected_for_size:
+            for partial_path in glob.glob(os.path.join(os.path.dirname(outtmpl), "*")):
+                _remove_rejected_file(partial_path)
+            raise RemoteDownloadTooLargeError("remote download exceeds configured maximum") from exc
+        raise
     files = glob.glob(os.path.join(os.path.dirname(outtmpl), "*"))
     if not files:
         return None
     files.sort(key=lambda p: os.path.getsize(p), reverse=True)
     filename = files[0]
+    if os.path.getsize(filename) > max_bytes:
+        _remove_rejected_file(filename)
+        raise RemoteDownloadTooLargeError("remote download exceeds configured maximum")
     _log(job_id, f"Downloaded to {filename}")
     return filename
 
@@ -805,6 +907,8 @@ def _build_media_command(
 
     if strip_metadata:
         cmd += ["-map_metadata", "-1"]
+    else:
+        cmd += ["-map_metadata", "0"]
 
     if family == "audio" and output_format == "alac":
         cmd += ["-f", "ipod"]
@@ -814,7 +918,7 @@ def _build_media_command(
 
 
 def _build_convert_command(input_path: str, output_path: str, family: str | None, profile: dict):
-    strip_metadata = bool(profile.get("strip_metadata", True))
+    strip_metadata = bool(profile.get("strip_metadata", False))
     cmd = ["ffmpeg", "-y", "-i", input_path]
 
     if family == "audio":
@@ -866,6 +970,8 @@ def _build_convert_command(input_path: str, output_path: str, family: str | None
 
     if strip_metadata:
         cmd += ["-map_metadata", "-1"]
+    else:
+        cmd += ["-map_metadata", "0"]
 
     cmd.append(output_path)
     return cmd
@@ -907,6 +1013,17 @@ def process_download_and_convert(self, job_id: int):
                 session.add(job)
                 session.commit()
                 return
+            try:
+                input_url = validate_remote_url(input_url, resolve=True)
+            except RemoteUrlPolicyError:
+                _log(job_id, "Remote URL rejected by network security policy")
+                job.status = "failed"
+                job.error_message = "remote_url_blocked"
+                job.current_step = "Remote URL blockiert"
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+                return
 
             tmp_root = os.environ.get('DATA_TMP_DIR', '/data/tmp')
             outdir = os.environ.get('DATA_OUTPUT_DIR', '/data/output')
@@ -914,7 +1031,7 @@ def process_download_and_convert(self, job_id: int):
             os.makedirs(tmpdir, exist_ok=True)
             os.makedirs(outdir, exist_ok=True)
 
-            _log(job_id, f"Starting download: {input_url}")
+            _log(job_id, "Starting remote download")
             input_obj = job.input or {}
             preset_name = (job.input or {}).get('preset') if job.input else None
             preset = _PRESETS.get(preset_name) if preset_name else _PRESETS.get('default', {})
@@ -925,7 +1042,7 @@ def process_download_and_convert(self, job_id: int):
                 DEFAULT_FORMATS[output_kind],
             )
             quality = _quality_preset(input_obj)
-            strip_metadata = bool(input_obj.get("strip_metadata", True))
+            strip_metadata = bool(input_obj.get("strip_metadata", False))
             fmt = _download_format_selector(output_kind, input_obj.get("download_quality"))
             download_timeout = preset.get('download_timeout', 300)
             retries = int(preset.get('retries', 3))
@@ -959,6 +1076,16 @@ def process_download_and_convert(self, job_id: int):
                     )
                     if filename:
                         break
+                except RemoteDownloadTooLargeError:
+                    _log(job_id, "Remote download rejected because it exceeds the configured maximum")
+                    job.status = "failed"
+                    job.error_message = "remote_download_too_large"
+                    job.current_step = "Remote-Datei ist zu groß"
+                    job.finished_at = datetime.datetime.utcnow()
+                    session.add(job)
+                    session.commit()
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                    return
                 except Exception as e:
                     _log(job_id, f"Download exception (attempt {attempt}): {e}")
 
@@ -971,11 +1098,19 @@ def process_download_and_convert(self, job_id: int):
                 job.error_message = 'download_failed'
                 session.add(job)
                 session.commit()
+                shutil.rmtree(tmpdir, ignore_errors=True)
                 return
 
-            _set_job_progress(session, job, 40, "Download abgeschlossen", force=True)
+            _set_job_progress(session, job, 40, "Malware-Prüfung des Downloads", force=True)
+            if not _scan_job_file(session, job, filename, "download input"):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return
 
-            outpath = os.path.join(outdir, f"job-{job_id}.{output_format}")
+            output_stem = _safe_stem(
+                input_obj.get("original_filename") or filename,
+                f"download-{job_id}",
+            )
+            outpath = _working_output_path(outdir, job_id, output_format)
             _log(job_id, f"Converting to {output_format}: {outpath}")
             try:
                 _log(job_id, f"Output decision: kind={output_kind} format={output_format} quality={quality}")
@@ -999,17 +1134,25 @@ def process_download_and_convert(self, job_id: int):
                 )
             except Exception as e:
                 _log(job_id, f"Conversion failed: {e}")
+                _remove_rejected_file(outpath)
+                shutil.rmtree(tmpdir, ignore_errors=True)
                 job.status = 'failed'
                 job.error_message = str(e)
                 session.add(job)
                 session.commit()
                 return
 
-            _log(job_id, f"Conversion finished: {outpath}")
+            _set_job_progress(session, job, 96, "Malware-Prüfung der Ausgabe", force=True)
+            if not _scan_job_file(session, job, outpath, "converted output"):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return
+
+            final_outpath = _publish_output(outpath, outdir, output_stem, output_format)
+            _log(job_id, f"Conversion finished: {final_outpath}")
             job.progress = 100
             job.status = 'success'
             job.current_step = "Fertig"
-            job.output_path = outpath
+            job.output_path = final_outpath
             job.finished_at = datetime.datetime.utcnow()
             job.expires_at = _output_expiry(job.finished_at)
             session.add(job)
@@ -1019,10 +1162,13 @@ def process_download_and_convert(self, job_id: int):
                 shutil.rmtree(tmpdir)
             except Exception:
                 pass
-            return {'output': outpath}
+            return {'output': final_outpath}
     except Exception as e:
         logging.exception('Unexpected worker error')
         _log(job_id, f"Unexpected error: {e}")
+        tmp_root = os.environ.get("DATA_TMP_DIR", "/data/tmp")
+        shutil.rmtree(os.path.join(tmp_root, f"job-{job_id}"), ignore_errors=True)
+        _cleanup_job_output_partials(os.environ.get("DATA_OUTPUT_DIR", "/data/output"), job_id)
         # best-effort DB update
         try:
             engine2 = _get_engine()
@@ -1075,6 +1221,10 @@ def process_convert(self, job_id: int):
                 session.commit()
                 return
 
+            _set_job_progress(session, job, 10, "Malware-Prüfung der Eingabedatei", force=True)
+            if not _scan_job_file(session, job, input_path, "uploaded input"):
+                return
+
             outdir = os.environ.get("DATA_OUTPUT_DIR", "/data/output")
             os.makedirs(outdir, exist_ok=True)
 
@@ -1123,11 +1273,11 @@ def process_convert(self, job_id: int):
                 DEFAULT_FORMATS.get(family, "mp3"),
             )
             output_format = _normalize_output_format(family, output_format)
-            strip_metadata = bool(input_obj.get("strip_metadata", True))
+            strip_metadata = bool(input_obj.get("strip_metadata", False))
 
             stem = _safe_stem(original_name, f"job-{job_id}")
             output_ext = "zip" if source_family == "pdf" and family == "image" else output_format
-            outpath = os.path.join(outdir, f"job-{job_id}-{stem}.{output_ext}")
+            outpath = _working_output_path(outdir, job_id, output_ext)
 
             _log(job_id, f"Starting local conversion: {input_path}")
             _log(job_id, f"Output decision: source_family={source_family} family={family} format={output_format} quality={quality}")
@@ -1164,6 +1314,7 @@ def process_convert(self, job_id: int):
                     )
             except Exception as e:
                 _log(job_id, f"Conversion failed: {e}")
+                _remove_rejected_file(outpath)
                 job.status = "failed"
                 job.error_message = str(e)
                 job.finished_at = datetime.datetime.utcnow()
@@ -1171,19 +1322,25 @@ def process_convert(self, job_id: int):
                 session.commit()
                 return
 
-            _log(job_id, f"Conversion finished: {outpath}")
+            _set_job_progress(session, job, 96, "Malware-Prüfung der Ausgabe", force=True)
+            if not _scan_job_file(session, job, outpath, "converted output"):
+                return
+
+            final_outpath = _publish_output(outpath, outdir, stem, output_ext)
+            _log(job_id, f"Conversion finished: {final_outpath}")
             job.progress = 100
             job.status = "success"
             job.current_step = "Fertig"
-            job.output_path = outpath
+            job.output_path = final_outpath
             job.finished_at = datetime.datetime.utcnow()
             job.expires_at = _output_expiry(job.finished_at)
             session.add(job)
             session.commit()
-            return {"output": outpath}
+            return {"output": final_outpath}
     except Exception as e:
         logging.exception("Unexpected local conversion worker error")
         _log(job_id, f"Unexpected error: {e}")
+        _cleanup_job_output_partials(os.environ.get("DATA_OUTPUT_DIR", "/data/output"), job_id)
         try:
             with Session(engine) as session2:
                 stmt2 = select(Job).where(Job.id == job_id)

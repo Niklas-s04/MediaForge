@@ -7,6 +7,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 
@@ -21,6 +22,12 @@ import worker  # noqa: E402
 from apps.api.app.models import Flow as ApiFlow, FlowRun as ApiFlowRun, Job as ApiJob  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def clean_malware_scan(monkeypatch):
+    monkeypatch.setattr(worker, "scan_file", lambda path: None)
+    monkeypatch.setattr(worker, "validate_remote_url", lambda url, resolve: str(url).strip())
+
+
 def create_test_engine(tmp_path: Path):
     engine = create_engine(f"sqlite:///{tmp_path / 'worker.db'}", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
@@ -31,6 +38,79 @@ def test_worker_uses_shared_api_models():
     assert worker.Job is ApiJob
     assert worker.Flow is ApiFlow
     assert worker.FlowRun is ApiFlowRun
+
+
+def test_scan_job_file_blocks_and_removes_detected_input(monkeypatch, tmp_path):
+    engine = create_test_engine(tmp_path)
+    source = tmp_path / "detected.bin"
+    source.write_bytes(b"payload")
+    monkeypatch.setenv("DATA_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(
+        worker,
+        "scan_file",
+        lambda path: (_ for _ in ()).throw(worker.MalwareDetectedError("Test.Signature")),
+    )
+
+    with Session(engine) as session:
+        job = worker.Job(type="convert", status="running", input={})
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        assert worker._scan_job_file(session, job, str(source), "test input") is False
+        session.refresh(job)
+
+        assert job.status == "failed"
+        assert job.error_message == "malware_detected"
+        assert job.finished_at is not None
+        assert not source.exists()
+
+
+def test_remote_download_size_limit_removes_partial_file(monkeypatch, tmp_path):
+    engine = create_test_engine(tmp_path)
+    download_dir = tmp_path / "download"
+    download_dir.mkdir()
+    partial = download_dir / "partial.bin"
+    monkeypatch.setenv("REMOTE_DOWNLOAD_MAX_BYTES", "4")
+
+    class OversizedYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            partial.write_bytes(b"12345")
+            self.options["progress_hooks"][0](
+                {"status": "downloading", "downloaded_bytes": 5, "total_bytes": 5}
+            )
+
+    monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", OversizedYoutubeDL, raising=False)
+
+    with Session(engine) as session:
+        job = worker.Job(type="download", status="running", input={})
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+
+        with pytest.raises(worker.RemoteDownloadTooLargeError):
+            worker._download_with_ytdlp(
+                session=session,
+                job=job,
+                job_id=job.id,
+                input_url="https://example.com/media",
+                fmt="best",
+                outtmpl=str(download_dir / "%(id)s.%(ext)s"),
+                attempt=1,
+                retries=1,
+                download_timeout=10,
+            )
+
+    assert not partial.exists()
 
 
 def test_process_download_and_convert_success(monkeypatch, tmp_path):
@@ -53,7 +133,7 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
 
     tmpdir = tmp_root / f"job-{job_id}"
     downloaded = tmpdir / "audio.mp3"
-    expected_output = str(output_dir / f"job-{job_id}.mp3")
+    expected_output = str(output_dir / "audio.mp3")
 
     class FakeYoutubeDL:
         def __init__(self, options):
@@ -78,7 +158,7 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
 
     def fake_check_call(cmd, stdout, stderr):
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / f"job-{job_id}.mp3").write_bytes(b"fake-mp3")
+        Path(cmd[-1]).write_bytes(b"fake-mp3")
         return 0
 
     monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", FakeYoutubeDL, raising=False)
@@ -98,7 +178,7 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
         assert saved.finished_at is not None
 
     log_text = (log_dir / f"job-{job_id}.log").read_text(encoding="utf-8")
-    assert "Starting download" in log_text
+    assert "Starting remote download" in log_text
     assert "Conversion finished" in log_text
 
 
@@ -132,7 +212,7 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
 
     tmpdir = tmp_root / f"job-{job_id}"
     downloaded = tmpdir / "video.mp4"
-    expected_output = output_dir / f"job-{job_id}.webm"
+    expected_output = output_dir / "video.webm"
     captured = {}
 
     class FakeYoutubeDL:
@@ -160,7 +240,7 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
     def fake_check_call(cmd, stdout, stderr):
         captured["ffmpeg_cmd"] = cmd
         output_dir.mkdir(parents=True, exist_ok=True)
-        expected_output.write_bytes(b"fake-webm")
+        Path(cmd[-1]).write_bytes(b"fake-webm")
         return 0
 
     monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", FakeYoutubeDL, raising=False)
@@ -175,7 +255,7 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
     assert "height<=720" in captured["ydl_options"]["format"]
     assert "-c:v" in captured["ffmpeg_cmd"]
     assert "libvpx-vp9" in captured["ffmpeg_cmd"]
-    assert str(expected_output) == captured["ffmpeg_cmd"][-1]
+    assert captured["ffmpeg_cmd"][-1].endswith(f".mediaforge-job-{job_id}.partial.webm")
 
 
 def test_build_media_command_supports_extended_formats():
@@ -234,6 +314,32 @@ def test_build_media_command_supports_extended_formats():
 
     tga_cmd = worker._build_media_command("in.png", "out.tga", "image", "tga", "balanced", True, {})
     assert tga_cmd[-1] == "out.tga"
+
+
+def test_build_media_command_preserves_or_removes_metadata_explicitly():
+    preserve_cmd = worker._build_media_command(
+        "input.flac", "output.mp3", "audio", "mp3", "balanced", False, {}
+    )
+    strip_cmd = worker._build_media_command(
+        "input.flac", "output.mp3", "audio", "mp3", "balanced", True, {}
+    )
+
+    assert preserve_cmd[preserve_cmd.index("-map_metadata") + 1] == "0"
+    assert strip_cmd[strip_cmd.index("-map_metadata") + 1] == "-1"
+
+
+def test_publish_output_uses_original_stem_and_collision_suffix(tmp_path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "Urlaub.mp3").write_bytes(b"existing")
+    partial = output_dir / ".mediaforge-job-7.partial.mp3"
+    partial.write_bytes(b"new")
+
+    result = worker._publish_output(str(partial), str(output_dir), "Urlaub", "mp3")
+
+    assert result == str(output_dir / "Urlaub (2).mp3")
+    assert Path(result).read_bytes() == b"new"
+    assert not partial.exists()
 
 
 def test_build_media_command_accepts_added_codec_options():
@@ -544,11 +650,11 @@ def test_process_convert_success(monkeypatch, tmp_path):
         session.refresh(job)
         job_id = job.id
 
-    expected_output = output_dir / f"job-{job_id}-sample.mp3"
+    expected_output = output_dir / "sample.mp3"
 
     def fake_check_call(cmd, stdout, stderr):
         output_dir.mkdir(parents=True, exist_ok=True)
-        expected_output.write_bytes(b"fake-mp3")
+        Path(cmd[-1]).write_bytes(b"fake-mp3")
         return 0
 
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)

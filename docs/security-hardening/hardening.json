@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Centralize untrusted-file admission and containment",
+  "targetRevision": "af62907e7b27ddb1a65d19f4142f34e6543b21ee",
+  "collectionSha256": "bbfd4928bae495b0019366bc0b52a44c9d7be5662d24bf5aea49be3d52267c17",
+  "selectedOptionId": "dedicated-clamd",
+  "sourceEvidence": [
+    {
+      "id": "E001",
+      "location": "apps/api/app/main.py",
+      "claim": "Uploads were persisted and dispatched without malware content scanning."
+    },
+    {
+      "id": "E002",
+      "location": "apps/worker/worker.py",
+      "claim": "Untrusted files entered native conversion parsers."
+    },
+    {
+      "id": "E003",
+      "location": "apps/api/app/main.py",
+      "claim": "Outputs and ZIP archives were served without a release scan."
+    },
+    {
+      "id": "E004",
+      "location": "apps/api/Dockerfile; apps/worker/Dockerfile; docker/docker-compose.yml",
+      "claim": "The application ran as root with a broad read-write data mount and no scanner service."
+    },
+    {
+      "id": "E005",
+      "location": "https://docs.clamav.net/manual/Usage/ClamdProtocol.html",
+      "claim": "Clamd supports streamed INSTREAM scans; its TCP protocol is unauthenticated and unencrypted."
+    },
+    {
+      "id": "E006",
+      "location": "https://docs.docker.com/engine/security/",
+      "claim": "Non-root execution, reduced capabilities and isolation reduce container compromise impact."
+    },
+    {
+      "id": "E007",
+      "location": "https://www.truenas.com/docs/solutions/optimizations/security/",
+      "claim": "TrueNAS recommends least privilege and restricted service/share exposure."
+    },
+    {
+      "id": "E008",
+      "location": "apps/api/requirements.txt; apps/worker/requirements.txt; apps/frontend/package.json; apps/frontend/package-lock.json",
+      "claim": "The target revision pinned vulnerable upload, framework, remote-download and frontend build dependencies."
+    },
+    {
+      "id": "E009",
+      "location": "apps/api/app/main.py; apps/worker/worker.py",
+      "claim": "Remote URLs had no private-address policy or remote byte ceiling."
+    }
+  ],
+  "options": [
+    {
+      "id": "validation-only",
+      "title": "Validation and parser updates only",
+      "summary": "Retain extension/family validation, reject unsupported files and keep converter packages current.",
+      "selected": false,
+      "evidenceRefs": ["E001", "E002", "E003"],
+      "controlOwnership": "API and worker",
+      "tradeoffs": {
+        "securityEffect": "Reduces accidental incompatibility but does not detect known malware or malicious output.",
+        "availability": "No scanner dependency and lowest latency.",
+        "performance": "Minimal CPU and memory overhead.",
+        "operability": "Simple, but parser patching must be consistently prompt.",
+        "cost": "No additional runtime service.",
+        "deliveryRisk": "Low implementation risk but leaves the primary file-borne threat untreated."
+      },
+      "residualRisk": "Known malware, weaponized documents and compromised output remain releasable."
+    },
+    {
+      "id": "dedicated-clamd",
+      "title": "Dedicated fail-closed ClamAV admission and release gate",
+      "summary": "Stream every input and output to an isolated non-root clamd service, block on findings or incomplete scans, and harden all containers.",
+      "selected": true,
+      "evidenceRefs": ["E001", "E002", "E003", "E004", "E005", "E006", "E007", "E008", "E009"],
+      "controlOwnership": "API owns upload/release gates; worker owns pre-parser/output gates; ClamAV owns signature detection; TrueNAS owns host containment and recovery.",
+      "tradeoffs": {
+        "securityEffect": "Blocks known malware at each material boundary and limits scanner/parser compromise impact.",
+        "availability": "Fail-closed behavior makes scanner health a dependency; clean output remains available for retry after transient release-scan failure.",
+        "performance": "Each file is streamed multiple times and ClamAV requires roughly 2-3 GiB RAM for large-file scanning.",
+        "operability": "Requires signature-volume monitoring, scanner health checks and an additional local image.",
+        "cost": "Consumes additional memory, CPU and initial signature-download bandwidth.",
+        "deliveryRisk": "Moderate rollout risk because existing data must be writable by UID/GID 10001 and ClamAV needs first-start warm-up time."
+      },
+      "residualRisk": "Unknown malware, parser zero-days, application-level abuse and a compromised worker's access to MediaForge data remain."
+    }
+  ]
+}

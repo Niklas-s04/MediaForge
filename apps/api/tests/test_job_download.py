@@ -12,6 +12,11 @@ from apps.api.app.main import download_job_output
 from apps.api.app.models import Job
 
 
+@pytest.fixture(autouse=True)
+def clean_malware_scan(monkeypatch):
+    monkeypatch.setattr(api_main, "scan_file", lambda path: None)
+
+
 def create_test_engine():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
@@ -109,6 +114,71 @@ def test_download_batch_output_waits_for_running_jobs(monkeypatch, tmp_path: Pat
             api_main.download_batch_output("batch-running", session=session)
 
     assert exc.value.status_code == 409
+
+
+def test_download_history_output_contains_all_finished_files(monkeypatch, tmp_path: Path):
+    engine = create_test_engine()
+    output_dir = tmp_path / "output"
+    first_dir = output_dir / "first"
+    second_dir = output_dir / "second"
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir()
+    first_file = first_dir / "result.mp3"
+    second_file = second_dir / "result.mp3"
+    first_file.write_bytes(b"first")
+    second_file.write_bytes(b"second")
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+
+    with Session(engine) as session:
+        session.add(Job(type="convert", status="success", output_path=str(first_file), input={}))
+        session.add(Job(type="download", status="success", output_path=str(second_file), input={}))
+        session.add(Job(type="convert", status="failed", input={}))
+        session.commit()
+
+        response = api_main.download_history_output(session=session)
+
+    try:
+        with zipfile.ZipFile(response.path) as archive:
+            assert archive.namelist() == ["result.mp3", "result (2).mp3"]
+            assert {archive.read("result.mp3"), archive.read("result (2).mp3")} == {b"first", b"second"}
+        assert response.filename.startswith("mediaforge-chronik-")
+        assert response.filename.endswith(".zip")
+    finally:
+        os.remove(response.path)
+
+
+def test_delete_history_outputs_removes_only_finished_files(monkeypatch, tmp_path: Path):
+    engine = create_test_engine()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    first_file = output_dir / "first.mkv"
+    second_file = output_dir / "second.png"
+    first_file.write_bytes(b"video")
+    second_file.write_bytes(b"image")
+    monkeypatch.setenv("DATA_OUTPUT_DIR", str(output_dir))
+
+    with Session(engine) as session:
+        first_job = Job(type="convert", status="success", output_path=str(first_file), input={})
+        second_job = Job(type="convert", status="success", output_path=str(second_file), input={})
+        failed_job = Job(type="convert", status="failed", input={})
+        session.add(first_job)
+        session.add(second_job)
+        session.add(failed_job)
+        session.commit()
+
+        result = api_main.delete_history_outputs(session=session)
+        session.refresh(first_job)
+        session.refresh(second_job)
+        session.refresh(failed_job)
+
+    assert result == {"deleted": 2}
+    assert not first_file.exists()
+    assert not second_file.exists()
+    assert first_job.status == "deleted"
+    assert second_job.status == "deleted"
+    assert first_job.output_path is None
+    assert second_job.output_path is None
+    assert failed_job.status == "failed"
 
 
 def test_expire_old_job_outputs_deletes_file_and_hides_job(monkeypatch, tmp_path: Path):

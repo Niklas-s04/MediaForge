@@ -13,6 +13,13 @@ from apps.api.app.models import Job
 from apps.api.app.schemas import JobCreate
 
 
+@pytest.fixture(autouse=True)
+def clean_malware_scan(monkeypatch):
+    monkeypatch.setattr(api_main, "scan_file", lambda path: None)
+    monkeypatch.setattr(api_main, "ping_malware_scanner", lambda: True)
+    monkeypatch.setattr(api_main, "validate_remote_url", lambda url, resolve: str(url).strip())
+
+
 def create_test_engine():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
@@ -71,6 +78,7 @@ def test_create_download_job_normalizes_media_options(monkeypatch):
     assert saved.input["download_quality"] == "720p"
     assert saved.input["quality_preset"] == "high"
     assert saved.input["compression_profile"] == "balanced"
+    assert saved.input["preserve_metadata"] is True
     assert saved.input["strip_metadata"] is False
 
 
@@ -249,9 +257,9 @@ def test_create_convert_batch_jobs_preserves_per_file_formats(monkeypatch, tmp_p
     ]
     settings = json.dumps(
         [
-            {"compression_family": "video", "output_format": "mkv"},
-            {"compression_family": "image", "output_format": "png"},
-            {"compression_family": "audio", "output_format": "mp3"},
+            {"compression_family": "video", "output_format": "mkv", "preserve_metadata": True},
+            {"compression_family": "image", "output_format": "png", "preserve_metadata": False},
+            {"compression_family": "audio", "output_format": "mp3", "preserve_metadata": True},
         ]
     )
 
@@ -273,7 +281,41 @@ def test_create_convert_batch_jobs_preserves_per_file_formats(monkeypatch, tmp_p
     assert sent_jobs == [job.id for job in saved]
     assert {job.input["batch_id"] for job in saved} == {result["batch_id"]}
     assert [job.input["output_format"] for job in saved] == ["mkv", "png", "mp3"]
+    assert [job.input["preserve_metadata"] for job in saved] == [True, False, True]
+    assert [job.input["strip_metadata"] for job in saved] == [False, True, False]
     assert len(list(upload_dir.glob("*"))) == 3
+
+
+def test_metadata_preservation_is_enabled_only_for_supported_conversions():
+    audio = api_main.normalize_convert_options(
+        file=fake_upload("track.flac", b"audio", content_type="audio/flac"),
+        compression_family="audio",
+        compression_profile="balanced",
+        output_format="mp3",
+        quality_preset="balanced",
+        strip_metadata=False,
+        preserve_metadata=True,
+    )
+    document = api_main.normalize_convert_options(
+        file=fake_upload(
+            "report.docx",
+            b"document",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        compression_family="pdf",
+        compression_profile="balanced",
+        output_format="pdf",
+        quality_preset="balanced",
+        strip_metadata=False,
+        preserve_metadata=True,
+    )
+
+    assert audio["metadata_preservation_supported"] is True
+    assert audio["preserve_metadata"] is True
+    assert audio["strip_metadata"] is False
+    assert document["metadata_preservation_supported"] is False
+    assert document["preserve_metadata"] is False
+    assert document["strip_metadata"] is False
 
 
 def test_default_convert_formats_are_mkv_png_and_mp3():

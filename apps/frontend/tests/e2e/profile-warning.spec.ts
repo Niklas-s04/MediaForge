@@ -1,5 +1,39 @@
 ﻿import { test, expect } from '@playwright/test';
 
+test('starts in dark mode on the converter tab', async ({ page }) => {
+  await page.route('**/api/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = path === '/api/jobs'
+      ? []
+      : path === '/api/options'
+        ? {
+            download: { formats: { video: ['mkv'], audio: ['mp3'] } },
+            convert: { formats: { video: ['mkv'], audio: ['mp3'], image: ['png'] } },
+          }
+        : { warning: null };
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#080d16');
+  await expect(page.getByRole('tab', { name: 'Konvertieren' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'Dateien im Batch konvertieren' })).toBeVisible();
+
+  const themeToggle = page.locator('.theme-toggle');
+  await expect(themeToggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(themeToggle).toContainText('Dunkel');
+  await themeToggle.click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f5f7fb');
+});
+
 test('confirms small quality warning through force job creation', async ({ page }) => {
   const jobRequests: { force: string | null; body: any }[] = [];
 
@@ -80,6 +114,7 @@ test('confirms small quality warning through force job creation', async ({ page 
   await page.waitForSelector('text=MediaForge', { timeout: 60000 });
 
 
+  await page.getByRole('tab', { name: 'Download' }).click();
   await page.fill('input[placeholder="https://..."]', 'https://example.invalid/sample');
   await page.click('[data-testid="quality-small"]');
 
@@ -147,6 +182,49 @@ test('clears selected local files after successful batch conversion', async ({ p
   await expect(page.locator('text=Batch gestartet: 1 Konvertierungen')).toBeVisible();
   await expect(page.locator('text=sample.wav')).toHaveCount(0);
   await expect(page.locator('text=Dateien auswählen oder hier ablegen')).toBeVisible();
+});
+
+test('controls metadata preservation separately for each supported batch file', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mkv'], audio: ['mp3'] } },
+        convert: { formats: { audio: ['mp3'], document: ['docx'] } },
+        metadata_preservation: { audio: ['mp3'] },
+      }),
+    });
+  });
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+  await page.setInputFiles('#file-upload', [
+    {
+      name: 'song.wav',
+      mimeType: 'audio/wav',
+      buffer: Buffer.from('fake-audio'),
+    },
+    {
+      name: 'report.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      buffer: Buffer.from('fake-document'),
+    },
+  ]);
+
+  const metadataButton = page.getByRole('button', { name: 'Metadaten erhalten' });
+  await expect(metadataButton).toBeVisible();
+  await expect(page.getByText('Keine Metadatenübernahme')).toBeVisible();
+  await expect(metadataButton).toHaveAttribute('aria-pressed', 'true');
+  await metadataButton.click();
+  await expect(page.getByRole('button', { name: 'Metadaten entfernen' })).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('asks before adding files with duplicate names', async ({ page }) => {
@@ -273,8 +351,8 @@ test('configures batch formats per file and downloads the finished ZIP', async (
 
   await page.click('button:has-text("2 Konvertierungen starten")');
   await expect(page.getByRole('button', { name: 'ZIP herunterladen (2)' })).toBeEnabled();
-  expect(multipartBody).toContain('{"compression_family":"video","output_format":"mkv"}');
-  expect(multipartBody).toContain('{"compression_family":"image","output_format":"jpg"}');
+  expect(multipartBody).toContain('{"compression_family":"video","output_format":"mkv","preserve_metadata":true}');
+  expect(multipartBody).toContain('{"compression_family":"image","output_format":"jpg","preserve_metadata":true}');
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'ZIP herunterladen (2)' }).click();
@@ -466,6 +544,7 @@ test('downloads finished output with unknown response length', async ({ page }) 
 
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.getByTestId('history-toggle').click();
   await page.locator('.download-row button:has-text("Download")').click();
 
   await expect(page.locator('.transfer-progress')).toContainText('Download: Auftrag #789');
@@ -495,6 +574,7 @@ test('closes the format picker when clicking outside of it', async ({ page }) =>
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
 
+  await page.getByRole('tab', { name: 'Download' }).click();
   await page.getByRole('button', { name: /MP4 Video/ }).click();
   await expect(page.locator('.format-menu')).toBeVisible();
   await expect(page.getByRole('button', { name: /WMV/ })).toBeVisible();
@@ -538,6 +618,8 @@ test('hides expired jobs from the frontend lists', async ({ page }) => {
 
   await expect(page.getByText('#11 Konvertierung')).toHaveCount(0);
   await expect(page.getByText('#12 Konvertierung')).toBeVisible();
+  await expect(page.getByTestId('history-toggle').locator('.count-label')).toHaveText('1');
+  await page.getByTestId('history-toggle').click();
   await expect(page.getByText('Auftrag #12')).toBeVisible();
   await expect(page.getByText('Auftrag #11')).toHaveCount(0);
 });
@@ -700,6 +782,7 @@ test('extends and deletes finished jobs from the frontend', async ({ page }) => 
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
 
+  await page.getByTestId('history-toggle').click();
   await expect(page.getByText('Löscht in')).toBeVisible();
   await page.locator('.download-row').getByRole('button', { name: 'Verlängern' }).click();
   await expect(page.getByText('Auftrag #44 wurde um 24h verlängert.')).toBeVisible();
@@ -707,5 +790,96 @@ test('extends and deletes finished jobs from the frontend', async ({ page }) => 
   await page.locator('.download-row').getByRole('button', { name: 'Löschen' }).click();
   await expect(page.getByText('#44 Konvertierung')).toHaveCount(0);
   await expect(page.locator('.download-row')).toHaveCount(0);
+});
+
+test('expands the finished history and handles all files at once', async ({ page }) => {
+  const finishedJobs = [
+    {
+      id: 81,
+      type: 'convert',
+      status: 'success',
+      progress: 100,
+      current_step: 'Fertig',
+      output_path: '/data/output/holiday.mkv',
+    },
+    {
+      id: 82,
+      type: 'convert',
+      status: 'success',
+      progress: 100,
+      current_step: 'Fertig',
+      output_path: '/data/output/cover.png',
+    },
+  ];
+  let historyDeleted = false;
+
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mkv'], audio: ['mp3'] } },
+        convert: { formats: { video: ['mkv'], audio: ['mp3'], image: ['png'] } },
+      }),
+    });
+  });
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+  await page.route('**/api/history/download', (route) => {
+    route.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': 'attachment; filename="mediaforge-chronik-test.zip"',
+      },
+      body: Buffer.from('history-zip'),
+    });
+  });
+  await page.route('**/api/history', (route) => {
+    if (route.request().method() !== 'DELETE') {
+      route.fallback();
+      return;
+    }
+    historyDeleted = true;
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ deleted: 2 }),
+    });
+  });
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(historyDeleted ? [] : finishedJobs),
+    });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+
+  const historyToggle = page.getByTestId('history-toggle');
+  await expect(historyToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(historyToggle.locator('.count-label')).toHaveText('2');
+  await expect(page.locator('.download-row')).toHaveCount(0);
+
+  await historyToggle.click();
+  await expect(historyToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.download-row')).toHaveCount(2);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByTestId('history-download-all').click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('mediaforge-chronik-test.zip');
+
+  await page.getByTestId('history-delete-all').click();
+  const dialog = page.getByRole('dialog', { name: 'Chronik löschen' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Alle löschen' }).click();
+
+  await expect(page.getByText('2 fertige Datei(en) wurden aus der Chronik gelöscht.')).toBeVisible();
+  await expect(page.locator('.download-row')).toHaveCount(0);
+  await expect(historyToggle.locator('.count-label')).toHaveText('0');
 });
 

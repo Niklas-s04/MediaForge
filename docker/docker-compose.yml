@@ -1,12 +1,13 @@
 services:
   api:
+    image: mediaforge-api:local
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
     container_name: nas_convert_api
     restart: unless-stopped
     ports:
-      - "${API_PORT:-8787}:8787"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8787}:8787"
     environment:
       - TZ=${TZ:-Europe/Berlin}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
@@ -15,14 +16,38 @@ services:
       - DATA_UPLOAD_DIR=${DATA_UPLOAD_DIR:-/data/uploads}
       - DATA_OUTPUT_DIR=${DATA_OUTPUT_DIR:-/data/output}
       - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-2147483648}
+      - REMOTE_DOWNLOAD_MAX_BYTES=${REMOTE_DOWNLOAD_MAX_BYTES:-2147483648}
       - OUTPUT_RETENTION_HOURS=${OUTPUT_RETENTION_HOURS:-24}
       - OUTPUT_CLEANUP_INTERVAL_SECONDS=${OUTPUT_CLEANUP_INTERVAL_SECONDS:-3600}
+      - MALWARE_SCAN_ENABLED=${MALWARE_SCAN_ENABLED:-true}
+      - CLAMAV_HOST=clamav
+      - CLAMAV_PORT=3310
+      - CLAMAV_TIMEOUT_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-330}
+      - CLAMAV_RETRIES=${CLAMAV_RETRIES:-2}
+      - MALWARE_SCAN_MAX_BYTES=${MALWARE_SCAN_MAX_BYTES:-2147483648}
     volumes:
       - ../data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    init: true
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      clamav:
+        condition: service_healthy
+    networks:
+      - backend
+      - scanner
+      - egress
 
   worker:
+    image: mediaforge-worker:local
     build:
       context: ..
       dockerfile: apps/worker/Dockerfile
@@ -35,13 +60,63 @@ services:
       - DATA_LOG_DIR=${DATA_LOG_DIR:-/data/logs}
       - DATA_UPLOAD_DIR=${DATA_UPLOAD_DIR:-/data/uploads}
       - DATA_OUTPUT_DIR=${DATA_OUTPUT_DIR:-/data/output}
+      - REMOTE_DOWNLOAD_MAX_BYTES=${REMOTE_DOWNLOAD_MAX_BYTES:-2147483648}
       - OUTPUT_RETENTION_HOURS=${OUTPUT_RETENTION_HOURS:-24}
       - DOCUMENT_CONVERT_TIMEOUT_SECONDS=${DOCUMENT_CONVERT_TIMEOUT_SECONDS:-120}
+      - MALWARE_SCAN_ENABLED=${MALWARE_SCAN_ENABLED:-true}
+      - CLAMAV_HOST=clamav
+      - CLAMAV_PORT=3310
+      - CLAMAV_TIMEOUT_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-330}
+      - CLAMAV_RETRIES=${CLAMAV_RETRIES:-2}
+      - MALWARE_SCAN_MAX_BYTES=${MALWARE_SCAN_MAX_BYTES:-2147483648}
     command: ["celery", "-A", "apps.worker.worker:celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-2}"]
     volumes:
       - ../data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-4g},mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    init: true
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      clamav:
+        condition: service_healthy
+    networks:
+      - backend
+      - scanner
+      - egress
+
+  clamav:
+    image: mediaforge-clamav:local
+    build:
+      context: clamav
+      dockerfile: Dockerfile
+    container_name: nas_convert_clamav
+    restart: unless-stopped
+    user: "clamav"
+    entrypoint: ["/init-unprivileged"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777
+      - /var/log/clamav:rw,noexec,nosuid,nodev,size=64m
+      - /run/clamav:rw,noexec,nosuid,nodev,size=16m
+    volumes:
+      - clamav-db:/var/lib/clamav
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: ${CLAMAV_MEMORY_LIMIT:-3g}
+    cpus: ${CLAMAV_CPUS:-2.0}
+    networks:
+      - scanner
+      - egress
 
   redis:
     image: redis:7-alpine
@@ -49,6 +124,24 @@ services:
     restart: unless-stopped
     volumes:
       - redis-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    networks:
+      - backend
 
 volumes:
   redis-data:
+  clamav-db:
+
+networks:
+  backend:
+    internal: true
+  scanner:
+    internal: true
+  egress:

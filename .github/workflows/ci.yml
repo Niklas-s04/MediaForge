@@ -20,6 +20,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r apps/api/requirements.txt
           pip install -r apps/worker/requirements.txt
+          pip install pip-audit
+      - name: Audit Python dependencies
+        run: |
+          python -m pip_audit -r apps/api/requirements.txt -r apps/worker/requirements.txt
       - name: Run tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -33,12 +37,15 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: 'npm'
           cache-dependency-path: apps/frontend/package-lock.json
       - name: Install frontend dependencies
         working-directory: apps/frontend
         run: npm ci
+      - name: Audit frontend dependencies
+        working-directory: apps/frontend
+        run: npm audit --audit-level=high
       - name: Typecheck and build
         working-directory: apps/frontend
         run: npm run check
@@ -50,4 +57,4 @@ jobs:
       - name: Validate compose file
         run: docker compose -f docker/docker-compose.yml config
       - name: Build Docker images
-        run: docker compose -f docker/docker-compose.yml build api worker
+        run: docker compose -f docker/docker-compose.yml build api worker clamav
