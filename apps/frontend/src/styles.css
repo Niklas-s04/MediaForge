@@ -1122,6 +1122,22 @@ h2 {
   color: var(--danger);
 }
 
+.duplicate-file-list {
+  display: grid;
+  max-height: 220px;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0.7rem 0.8rem 0.7rem 1.8rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.duplicate-file-list li {
+  overflow-wrap: anywhere;
+}
+
 .modal footer {
   display: flex;
   justify-content: flex-end;

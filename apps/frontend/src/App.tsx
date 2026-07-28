@@ -955,6 +955,7 @@ function App() {
   const [pickerOpen, setPickerOpen] = useState<string | null>(null)
   const [compressionWarning, setCompressionWarning] = useState<string | null>(null)
   const [pendingWarning, setPendingWarning] = useState<string | null>(null)
+  const [pendingDuplicateFiles, setPendingDuplicateFiles] = useState<BatchFile[]>([])
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
   const [transfer, setTransfer] = useState<TransferState | null>(null)
   const [downloadCatalog, setDownloadCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
@@ -1083,10 +1084,38 @@ function App() {
         outputFormat: defaultFormatForFamily(source),
       })
     })
-    if (compatible.length) setConvertFiles((current) => [...current, ...compatible])
+
+    const knownNames = new Set(convertFiles.map((item) => item.file.name.trim().toLowerCase()))
+    const uniqueFiles: BatchFile[] = []
+    const duplicateFiles: BatchFile[] = []
+    compatible.forEach((item) => {
+      const normalizedName = item.file.name.trim().toLowerCase()
+      if (knownNames.has(normalizedName)) {
+        duplicateFiles.push(item)
+        return
+      }
+      knownNames.add(normalizedName)
+      uniqueFiles.push(item)
+    })
+
+    if (uniqueFiles.length) setConvertFiles((current) => [...current, ...uniqueFiles])
+    setPendingDuplicateFiles(duplicateFiles)
     setTransfer(null)
     setMessage(incompatible.length ? `Nicht kompatibel: ${incompatible.join(', ')}` : null)
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const confirmDuplicateFiles = () => {
+    const count = pendingDuplicateFiles.length
+    if (count) setConvertFiles((current) => [...current, ...pendingDuplicateFiles])
+    setPendingDuplicateFiles([])
+    setMessage(`${count} doppelte ${count === 1 ? 'Datei wurde' : 'Dateien wurden'} trotzdem hinzugefügt.`)
+  }
+
+  const rejectDuplicateFiles = () => {
+    const count = pendingDuplicateFiles.length
+    setPendingDuplicateFiles([])
+    setMessage(`${count} doppelte ${count === 1 ? 'Datei wurde' : 'Dateien wurden'} nicht hinzugefügt.`)
   }
 
   const analyzeDownload = async () => {
@@ -1691,6 +1720,17 @@ function App() {
           <p>Das gewählte Qualitätsziel kann sichtbare oder hörbare Verluste verursachen:</p>
           <p><strong>{pendingWarning}</strong></p>
           <p>Möchtest du trotzdem fortfahren?</p>
+        </Modal>
+      ) : null}
+      {pendingDuplicateFiles.length ? (
+        <Modal title="Doppelte Dateinamen" onClose={rejectDuplicateFiles} onConfirm={confirmDuplicateFiles} cancelLabel="Nicht hinzufügen" confirmLabel="Trotzdem hinzufügen">
+          <p>Folgende Dateinamen sind in diesem Batch bereits vorhanden:</p>
+          <ul className="duplicate-file-list">
+            {pendingDuplicateFiles.map((item) => (
+              <li key={item.id}><strong>{item.file.name}</strong></li>
+            ))}
+          </ul>
+          <p>Möchtest du die doppelten Dateien wirklich zusätzlich konvertieren?</p>
         </Modal>
       ) : null}
     </main>

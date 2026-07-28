@@ -149,6 +149,58 @@ test('clears selected local files after successful batch conversion', async ({ p
   await expect(page.locator('text=Dateien auswählen oder hier ablegen')).toBeVisible();
 });
 
+test('asks before adding files with duplicate names', async ({ page }) => {
+  await page.route('**/api/options', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        download: { formats: { video: ['mkv'], audio: ['mp3'] } },
+        convert: { formats: { audio: ['mp3'] } },
+      }),
+    });
+  });
+  await page.route('**/api/compression/profile*', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ warning: null }) });
+  });
+  await page.route('**/api/jobs', (route) => {
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await page.click('button:has-text("Konvertieren")');
+
+  await page.setInputFiles('#file-upload', {
+    name: 'sample.wav',
+    mimeType: 'audio/wav',
+    buffer: Buffer.from('first-audio'),
+  });
+  await expect(page.locator('.batch-file-row')).toHaveCount(1);
+
+  await page.setInputFiles('#file-upload', {
+    name: 'sample.wav',
+    mimeType: 'audio/wav',
+    buffer: Buffer.from('second-audio'),
+  });
+  await expect(page.getByRole('dialog', { name: 'Doppelte Dateinamen' })).toBeVisible();
+  await expect(page.locator('.batch-file-row')).toHaveCount(1);
+
+  await page.getByRole('button', { name: 'Nicht hinzufügen' }).click();
+  await expect(page.getByRole('dialog', { name: 'Doppelte Dateinamen' })).toHaveCount(0);
+  await expect(page.locator('.batch-file-row')).toHaveCount(1);
+
+  await page.setInputFiles('#file-upload', {
+    name: 'SAMPLE.WAV',
+    mimeType: 'audio/wav',
+    buffer: Buffer.from('third-audio'),
+  });
+  await expect(page.getByRole('dialog', { name: 'Doppelte Dateinamen' })).toContainText('SAMPLE.WAV');
+  await page.getByRole('button', { name: 'Trotzdem hinzufügen' }).click();
+  await expect(page.locator('.batch-file-row')).toHaveCount(2);
+  await expect(page.locator('text=1 doppelte Datei wurde trotzdem hinzugefügt.')).toBeVisible();
+});
+
 test('configures batch formats per file and downloads the finished ZIP', async ({ page }) => {
   let batchStarted = false;
   let multipartBody = '';
