@@ -38,7 +38,7 @@ services:
     init: true
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
       clamav:
         condition: service_healthy
     networks:
@@ -83,7 +83,7 @@ services:
     init: true
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
       clamav:
         condition: service_healthy
     networks:
@@ -103,8 +103,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777
-      - /var/log/clamav:rw,noexec,nosuid,nodev,size=64m
-      - /run/clamav:rw,noexec,nosuid,nodev,size=16m
+      - /var/log/clamav:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /run/clamav:rw,noexec,nosuid,nodev,size=16m,mode=1777
     volumes:
       - clamav-db:/var/lib/clamav
     security_opt:
@@ -122,6 +122,9 @@ services:
     image: redis:7-alpine
     container_name: nas_convert_redis
     restart: unless-stopped
+    # The official entrypoint only switches users when started as root. Starting
+    # as redis avoids requiring SETUID/SETGID capabilities with cap_drop: ALL.
+    user: "redis"
     volumes:
       - redis-data:/data
     read_only: true
@@ -132,6 +135,12 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 128
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     networks:
       - backend
 

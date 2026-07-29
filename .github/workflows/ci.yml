@@ -62,3 +62,18 @@ jobs:
         run: |
           docker run --rm --entrypoint python mediaforge-api:local -c "import apps.api.app.main"
           docker run --rm --entrypoint python mediaforge-worker:local -c "import apps.worker.worker"
+      - name: Smoke-test hardened Redis startup
+        run: |
+          cleanup() {
+            docker compose -f docker/docker-compose.yml down --volumes
+          }
+          trap cleanup EXIT
+          docker compose -f docker/docker-compose.yml up -d redis
+          for attempt in $(seq 1 20); do
+            if [ "$(docker compose -f docker/docker-compose.yml exec -T redis redis-cli ping 2>/dev/null)" = "PONG" ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -f docker/docker-compose.yml logs redis
+          exit 1
