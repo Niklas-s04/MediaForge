@@ -42,6 +42,11 @@
   --shadow-soft: 0 10px 24px rgba(27, 42, 68, 0.09);
   --shadow-primary: 0 10px 22px rgba(36, 103, 214, 0.22);
   --shadow: 0 18px 44px rgba(27, 42, 68, 0.1);
+  --motion-fast: 140ms;
+  --motion-base: 220ms;
+  --motion-slow: 380ms;
+  --ease-standard: cubic-bezier(0.2, 0.75, 0.25, 1);
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -235,6 +240,11 @@ h2 {
   box-shadow: var(--shadow-soft);
   backdrop-filter: blur(14px);
   font-weight: 780;
+  transition:
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-base) ease,
+    background var(--motion-base) ease,
+    box-shadow var(--motion-base) ease;
 }
 
 .theme-toggle i {
@@ -255,7 +265,7 @@ h2 {
   border-radius: 50%;
   background: var(--primary);
   content: "";
-  transition: transform 160ms ease;
+  transition: transform var(--motion-base) var(--ease-emphasized);
 }
 
 .theme-toggle[aria-pressed="true"] i::after {
@@ -273,14 +283,10 @@ h2 {
   font-weight: 760;
   line-height: 1;
   transition:
-    transform 120ms ease,
-    box-shadow 120ms ease,
-    background 120ms ease,
-    border-color 120ms ease;
-}
-
-.button:hover {
-  transform: translateY(-1px);
+    transform var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
 }
 
 .button.primary {
@@ -319,6 +325,7 @@ h2 {
 }
 
 .tab-bar {
+  position: relative;
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(140px, 1fr));
   gap: 0.35rem;
@@ -328,21 +335,46 @@ h2 {
   padding: 0.35rem;
   background: var(--surface);
   box-shadow: var(--shadow-soft);
+  isolation: isolate;
+}
+
+.tab-bar::before {
+  position: absolute;
+  z-index: -1;
+  top: 0.35rem;
+  bottom: 0.35rem;
+  left: 0.35rem;
+  width: calc((100% - 1.05rem) / 2);
+  border-radius: 8px;
+  background: var(--primary);
+  box-shadow: var(--shadow-primary);
+  content: "";
+  transition:
+    transform var(--motion-base) var(--ease-emphasized),
+    background var(--motion-base) ease,
+    box-shadow var(--motion-base) ease;
+}
+
+.tab-bar.convert-active::before {
+  transform: translateX(calc(100% + 0.35rem));
 }
 
 .tab-button {
+  position: relative;
+  z-index: 1;
   min-height: 42px;
   border: 0;
   border-radius: 8px;
   color: var(--muted);
   background: transparent;
   font-weight: 820;
+  transition: color var(--motion-fast) ease;
 }
 
 .tab-button.active {
   color: var(--on-primary);
-  background: var(--primary);
-  box-shadow: var(--shadow-primary);
+  background: transparent;
+  box-shadow: none;
 }
 
 .panel {
@@ -558,15 +590,25 @@ h2 {
   text-align: center;
   background: var(--surface-soft);
   transition:
+    transform var(--motion-base) var(--ease-standard),
     border-color 150ms ease,
     background 150ms ease,
     box-shadow 150ms ease;
 }
 
-.upload-area label:hover {
+.upload-area label:hover,
+.upload-area label.drag-active {
   border-color: var(--primary);
   background: var(--surface-soft);
   box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.upload-area label.drag-active {
+  transform: scale(1.008);
+  border-style: solid;
+  box-shadow:
+    inset 0 0 0 1px var(--primary),
+    0 14px 34px var(--focus-ring);
 }
 
 .convert-card {
@@ -628,6 +670,12 @@ h2 {
   color: var(--convert-muted);
   background: var(--surface);
   font-weight: 760;
+  transition:
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
 
 .metadata-button.active {
@@ -719,6 +767,10 @@ h2 {
   border: 1px solid var(--format-accent);
   color: var(--convert-text);
   background: var(--surface-soft);
+  transition:
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) ease,
+    background var(--motion-fast) ease;
 }
 
 .format-button small {
@@ -859,6 +911,11 @@ h2 {
   color: inherit;
   text-align: left;
   background: var(--surface);
+  transition:
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
 
 .quality-row button.active,
@@ -1085,6 +1142,7 @@ h2 {
 
 .history-content {
   border-top: 1px solid var(--border);
+  transform-origin: top center;
 }
 
 .history-actions {
@@ -1116,6 +1174,11 @@ h2 {
   color: inherit;
   text-align: left;
   background: var(--surface);
+  transition:
+    transform var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
 
 .list-item:hover,
@@ -1148,6 +1211,10 @@ h2 {
   font-size: 0.74rem;
   font-weight: 820;
   text-transform: uppercase;
+  transition:
+    color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    transform var(--motion-fast) var(--ease-standard);
 }
 
 .status-badge.success {
@@ -1303,6 +1370,155 @@ h2 {
   background: var(--primary);
 }
 
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes reveal-scale {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes logo-settle {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) rotate(-3deg) scale(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) rotate(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .topbar {
+    animation: reveal-up var(--motion-slow) var(--ease-emphasized) both;
+  }
+
+  .brand-mark {
+    animation: logo-settle 520ms var(--ease-emphasized) 40ms both;
+  }
+
+  .tab-bar {
+    animation: reveal-up var(--motion-slow) var(--ease-emphasized) 60ms both;
+  }
+
+  .work-panel {
+    animation: reveal-up var(--motion-slow) var(--ease-emphasized) 100ms both;
+  }
+
+  .job-detail {
+    animation: reveal-up var(--motion-slow) var(--ease-emphasized) 140ms both;
+  }
+
+  .side-column > .panel {
+    animation: reveal-up var(--motion-slow) var(--ease-emphasized) both;
+  }
+
+  .side-column > .panel:nth-child(1) {
+    animation-delay: 140ms;
+  }
+
+  .side-column > .panel:nth-child(2) {
+    animation-delay: 180ms;
+  }
+
+  .tab-content,
+  .inspect-result,
+  .advanced-panel,
+  .transfer-progress,
+  .warning-inline,
+  .message,
+  .history-content,
+  .log-panel {
+    animation: reveal-up var(--motion-base) var(--ease-emphasized) both;
+  }
+
+  .format-menu {
+    transform-origin: top right;
+    animation: reveal-scale var(--motion-base) var(--ease-emphasized) both;
+  }
+
+  .batch-file-row,
+  .list-item,
+  .download-row {
+    animation: reveal-up 280ms var(--ease-emphasized) both;
+  }
+
+  .modal-overlay {
+    animation: fade-in var(--motion-base) ease both;
+  }
+
+  .modal {
+    animation: reveal-scale 280ms var(--ease-emphasized) both;
+  }
+
+  .button:hover:not(:disabled),
+  .theme-toggle:hover,
+  .metadata-button:hover,
+  .format-button:hover,
+  .option-tile:hover,
+  .quality-row button:hover,
+  .list-item:hover {
+    transform: translateY(-2px);
+  }
+
+  .button:active:not(:disabled),
+  .theme-toggle:active,
+  .metadata-button:active,
+  .format-button:active,
+  .option-tile:active,
+  .quality-row button:active,
+  .list-item:active {
+    transform: translateY(0) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .progress-meter.indeterminate .progress-track span,
+  .list-progress i.indeterminate {
+    width: 100% !important;
+    animation: none !important;
+    opacity: 0.72;
+  }
+}
+
 :root[data-theme="dark"] .upload-area label {
   background:
     linear-gradient(135deg, rgba(40, 110, 232, 0.1), transparent 55%),
@@ -1351,7 +1567,6 @@ h2 {
 
   .theme-toggle,
   .url-row,
-  .tab-bar,
   .convert-card,
   .batch-file-row,
   .format-menu-body,

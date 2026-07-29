@@ -34,6 +34,32 @@ test('starts in dark mode on the converter tab', async ({ page }) => {
   await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f5f7fb');
 });
 
+test('uses interface motion while honoring reduced-motion preferences', async ({ page }) => {
+  await page.route('**/api/**', (route) => {
+    const path = new URL(route.request().url()).pathname;
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(path === '/api/jobs'
+        ? []
+        : path === '/api/options'
+          ? {
+              download: { formats: { video: ['mkv'], audio: ['mp3'] } },
+              convert: { formats: { video: ['mkv'], audio: ['mp3'], image: ['png'] } },
+            }
+          : { warning: null }),
+    });
+  });
+
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.goto('/');
+  await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
+  await expect(page.locator('.work-panel')).toHaveCSS('animation-name', 'reveal-up');
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(page.locator('.work-panel')).toHaveCSS('animation-name', 'none');
+});
+
 test('confirms small quality warning through force job creation', async ({ page }) => {
   const jobRequests: { force: string | null; body: any }[] = [];
 

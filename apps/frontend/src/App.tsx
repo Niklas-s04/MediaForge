@@ -988,11 +988,13 @@ function App() {
   const [historyAction, setHistoryAction] = useState<'download' | 'delete' | null>(null)
   const [pendingHistoryDelete, setPendingHistoryDelete] = useState(false)
   const [transfer, setTransfer] = useState<TransferState | null>(null)
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false)
   const [downloadCatalog, setDownloadCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
   const [convertCatalog, setConvertCatalog] = useState<Record<MediaFamily, FormatDef[]>>(formatCatalog)
   const [metadataFormats, setMetadataFormats] = useState<Partial<Record<MediaFamily, string[]>>>(defaultMetadataFormats)
   const [now, setNow] = useState(Date.now())
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const dragDepthRef = useRef(0)
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) || null, [jobs, selectedId])
   const finishedJobs = useMemo(() => jobs.filter((job) => job.status === 'success' && job.output_path), [jobs])
@@ -1545,8 +1547,27 @@ function App() {
 
   const onDropFile = (event: React.DragEvent<HTMLLabelElement>) => {
     event.preventDefault()
+    dragDepthRef.current = 0
+    setIsDraggingFiles(false)
     const files = Array.from(event.dataTransfer.files || [])
     if (files.length) handleSelectedFiles(files)
+  }
+
+  const onDragEnterFiles = (event: React.DragEvent<HTMLLabelElement>) => {
+    event.preventDefault()
+    dragDepthRef.current += 1
+    setIsDraggingFiles(true)
+  }
+
+  const onDragOverFiles = (event: React.DragEvent<HTMLLabelElement>) => {
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  const onDragLeaveFiles = (event: React.DragEvent<HTMLLabelElement>) => {
+    event.preventDefault()
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) setIsDraggingFiles(false)
   }
 
   const availableHeights = (downloadInfo?.formats || [])
@@ -1576,14 +1597,14 @@ function App() {
 
       <section className="main-layout">
         <div className="work-column">
-          <div className="tab-bar" role="tablist" aria-label="Auftragstyp">
+          <div className={`tab-bar ${activeTab}-active`} role="tablist" aria-label="Auftragstyp">
             <button className={`tab-button ${activeTab === 'download' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'download'} type="button" onClick={() => setActiveTab('download')}>Download</button>
             <button className={`tab-button ${activeTab === 'convert' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'convert'} type="button" onClick={() => setActiveTab('convert')}>Konvertieren</button>
           </div>
 
           <section className="panel work-panel">
             {activeTab === 'download' ? (
-              <>
+              <div className="tab-content" key="download">
                 <div className="panel-header">
                   <div>
                     <p className="eyebrow">Online-Quelle</p>
@@ -1644,9 +1665,9 @@ function App() {
                     />
                   ) : null}
                 </div>
-              </>
+              </div>
             ) : (
-              <>
+              <div className="tab-content" key="convert">
                 <div className="panel-header">
                   <div>
                     <p className="eyebrow">Lokale Datei</p>
@@ -1655,14 +1676,21 @@ function App() {
                 </div>
                 <div className="upload-area">
                   <input id="file-upload" ref={fileInputRef} type="file" multiple accept={uploadAccept} onChange={(e) => handleSelectedFiles(Array.from(e.target.files || []))} />
-                  <label htmlFor="file-upload" onDragOver={(event) => event.preventDefault()} onDrop={onDropFile}>
+                  <label
+                    className={isDraggingFiles ? 'drag-active' : ''}
+                    htmlFor="file-upload"
+                    onDragEnter={onDragEnterFiles}
+                    onDragOver={onDragOverFiles}
+                    onDragLeave={onDragLeaveFiles}
+                    onDrop={onDropFile}
+                  >
                     <strong>{convertFiles.length ? `${convertFiles.length} Datei(en) ausgewählt – weitere hinzufügen` : 'Dateien auswählen oder hier ablegen'}</strong>
                     <span>Mehrere Audio-, Video-, Bild-, PDF-, Text- oder Office-Dateien gleichzeitig auswählen</span>
                   </label>
                 </div>
                 {convertFiles.length ? (
                   <div className="batch-file-list">
-                    {convertFiles.map((item) => {
+                    {convertFiles.map((item, index) => {
                       const itemCatalog = catalogForSource(convertCatalog, item.sourceFamily)
                       const pickerId = `convert-${item.id}`
                       const canPreserveMetadata = metadataPreservationSupported(
@@ -1672,7 +1700,11 @@ function App() {
                         metadataFormats,
                       )
                       return (
-                        <div className="batch-file-row" key={item.id}>
+                        <div
+                          className="batch-file-row"
+                          key={item.id}
+                          style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
+                        >
                           <div className="source-file">
                             <span className="file-icon">{fileExt(item.file.name).slice(0, 3)}</span>
                             <div>
@@ -1765,7 +1797,7 @@ function App() {
                     />
                   ) : null}
                 </div>
-              </>
+              </div>
             )}
 
             {compressionWarning ? <div className="warning-inline"><strong>Hinweis:</strong> {compressionWarning}</div> : null}
@@ -1809,8 +1841,14 @@ function App() {
               <EmptyState title="Noch keine Aufträge" text="Starte einen Download oder lade eine Datei zur Konvertierung hoch." />
             ) : (
               <div className="item-list">
-                {jobs.map((job) => (
-                  <button key={job.id} className={`list-item ${selectedId === job.id ? 'selected' : ''}`} type="button" onClick={() => setSelectedId(job.id)}>
+                {jobs.map((job, index) => (
+                  <button
+                    key={job.id}
+                    className={`list-item ${selectedId === job.id ? 'selected' : ''}`}
+                    style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+                    type="button"
+                    onClick={() => setSelectedId(job.id)}
+                  >
                     <span className="item-main">
                       <strong>#{job.id} {job.type === 'convert' ? 'Konvertierung' : 'Download'}</strong>
                       <small>{job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet')}</small>
@@ -1875,8 +1913,12 @@ function App() {
                       </button>
                     </div>
                     <div className="download-list">
-                      {finishedJobs.map((job) => (
-                        <div className="download-row" key={job.id}>
+                      {finishedJobs.map((job, index) => (
+                        <div
+                          className="download-row"
+                          key={job.id}
+                          style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+                        >
                           <span>
                             <strong>{fallbackDownloadName(job)}</strong>
                             <small>Auftrag #{job.id}</small>
