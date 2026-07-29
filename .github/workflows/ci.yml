@@ -58,3 +58,7 @@ jobs:
         run: docker compose -f docker/docker-compose.yml config
       - name: Build Docker images
         run: docker compose -f docker/docker-compose.yml build api worker clamav
+      - name: Smoke-test non-root application imports
+        run: |
+          docker run --rm --entrypoint python mediaforge-api:local -c "import apps.api.app.main"
+          docker run --rm --entrypoint python mediaforge-worker:local -c "import apps.worker.worker"

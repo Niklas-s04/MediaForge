@@ -24,6 +24,7 @@ COPY --from=frontend-build /src/apps/frontend/dist ./static
 RUN groupadd --gid 10001 mediaforge \
 	&& useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin mediaforge \
 	&& mkdir -p /data /tmp/mediaforge-home \
+	&& chmod -R a=rX /app \
 	&& chown -R mediaforge:mediaforge /data /tmp/mediaforge-home
 
 USER 10001:10001
