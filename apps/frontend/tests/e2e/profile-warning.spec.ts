@@ -886,13 +886,26 @@ test('expands the finished history and handles all files at once', async ({ page
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
 
   const historyToggle = page.getByTestId('history-toggle');
+  const historyReveal = page.locator('.history-reveal');
   await expect(historyToggle).toHaveAttribute('aria-expanded', 'false');
   await expect(historyToggle.locator('.count-label')).toHaveText('2');
-  await expect(page.locator('.download-row')).toHaveCount(0);
+  await expect(historyToggle.locator('.history-chevron svg')).toHaveCount(1);
+  await expect(historyReveal).toHaveAttribute('aria-hidden', 'true');
+  await expect(historyReveal).toBeHidden();
 
   await historyToggle.click();
   await expect(historyToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(historyReveal).toHaveAttribute('aria-hidden', 'false');
+  await expect(historyReveal).toBeVisible();
   await expect(page.locator('.download-row')).toHaveCount(2);
+
+  await historyToggle.click();
+  await expect(historyToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(historyReveal).toBeHidden();
+
+  await historyToggle.click();
+  await expect(historyToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(historyReveal).toBeVisible();
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByTestId('history-download-all').click();

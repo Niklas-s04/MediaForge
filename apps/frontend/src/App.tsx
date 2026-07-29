@@ -1883,57 +1883,63 @@ function App() {
               </span>
               <span className="history-summary">
                 <span className="count-label">{finishedJobs.length}</span>
-                <span className="history-chevron" aria-hidden="true">⌄</span>
+                <span className="history-chevron" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="m6.5 9.25 5.5 5.5 5.5-5.5" />
+                  </svg>
+                </span>
               </span>
             </button>
-            {historyOpen ? (
-              <div className="history-content" id="finished-history">
-                {finishedJobs.length === 0 ? (
-                  <EmptyState title="Keine fertigen Dateien" text={`${activeJobs} Auftrag(e) laufen oder warten aktuell.`} />
-                ) : (
-                  <>
-                    <div className="history-actions">
-                      <button
-                        className="button secondary"
-                        data-testid="history-download-all"
-                        type="button"
-                        disabled={Boolean(historyAction)}
-                        onClick={downloadHistory}
-                      >
-                        {historyAction === 'download' ? 'ZIP wird erstellt…' : 'Alle herunterladen'}
-                      </button>
-                      <button
-                        className="button ghost history-delete-all"
-                        data-testid="history-delete-all"
-                        type="button"
-                        disabled={Boolean(historyAction)}
-                        onClick={() => setPendingHistoryDelete(true)}
-                      >
-                        Alle löschen
-                      </button>
-                    </div>
-                    <div className="download-list">
-                      {finishedJobs.map((job, index) => (
-                        <div
-                          className="download-row"
-                          key={job.id}
-                          style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+            <div className="history-reveal" aria-hidden={!historyOpen}>
+              <div className="history-reveal-inner">
+                <div className="history-content" id="finished-history">
+                  {finishedJobs.length === 0 ? (
+                    <EmptyState title="Keine fertigen Dateien" text={`${activeJobs} Auftrag(e) laufen oder warten aktuell.`} />
+                  ) : (
+                    <>
+                      <div className="history-actions">
+                        <button
+                          className="button secondary"
+                          data-testid="history-download-all"
+                          type="button"
+                          disabled={Boolean(historyAction)}
+                          onClick={downloadHistory}
                         >
-                          <span>
-                            <strong>{fallbackDownloadName(job)}</strong>
-                            <small>Auftrag #{job.id}</small>
-                            <small>{formatExpiry(job.expires_at, now)}</small>
-                          </span>
-                          <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
-                          <button className="button secondary" type="button" onClick={() => extendJob(job)}>Verlängern</button>
-                          <button className="button ghost" type="button" onClick={() => deleteJob(job)}>Löschen</button>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
+                          {historyAction === 'download' ? 'ZIP wird erstellt…' : 'Alle herunterladen'}
+                        </button>
+                        <button
+                          className="button ghost history-delete-all"
+                          data-testid="history-delete-all"
+                          type="button"
+                          disabled={Boolean(historyAction)}
+                          onClick={() => setPendingHistoryDelete(true)}
+                        >
+                          Alle löschen
+                        </button>
+                      </div>
+                      <div className="download-list">
+                        {finishedJobs.map((job, index) => (
+                          <div
+                            className="download-row"
+                            key={job.id}
+                            style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+                          >
+                            <span>
+                              <strong>{fallbackDownloadName(job)}</strong>
+                              <small>Auftrag #{job.id}</small>
+                              <small>{formatExpiry(job.expires_at, now)}</small>
+                            </span>
+                            <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
+                            <button className="button secondary" type="button" onClick={() => extendJob(job)}>Verlängern</button>
+                            <button className="button ghost" type="button" onClick={() => deleteJob(job)}>Löschen</button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
-            ) : null}
+            </div>
           </section>
         </aside>
       </section>

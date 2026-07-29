@@ -1103,11 +1103,18 @@ h2 {
   color: var(--text);
   text-align: left;
   background: transparent;
-  transition: background 150ms ease;
+  transition:
+    background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
 
 .history-toggle:hover {
   background: var(--surface-soft);
+}
+
+.history-toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 3px var(--focus-ring);
 }
 
 .history-toggle > span:first-child {
@@ -1127,22 +1134,84 @@ h2 {
 
 .history-chevron {
   display: grid;
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   place-items: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
   color: var(--muted);
-  font-size: 1.35rem;
-  line-height: 1;
-  transition: transform 160ms ease;
+  background: var(--surface-soft);
+  transition:
+    transform 300ms var(--ease-emphasized),
+    color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
+}
+
+.history-chevron svg {
+  width: 18px;
+  height: 18px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.history-toggle:hover .history-chevron {
+  border-color: var(--border);
+  color: var(--primary-dark);
+  background: var(--count-bg);
+  box-shadow: 0 5px 14px var(--focus-ring);
 }
 
 .downloads-panel.open .history-chevron {
   transform: rotate(180deg);
+  border-color: var(--border);
+  color: var(--primary-dark);
+  background: var(--count-bg);
+}
+
+.history-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    grid-template-rows 320ms var(--ease-emphasized),
+    opacity 180ms ease,
+    visibility 0s linear 320ms;
+}
+
+.downloads-panel.open .history-reveal {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  opacity: 1;
+  transition:
+    grid-template-rows 320ms var(--ease-emphasized),
+    opacity var(--motion-base) ease 50ms,
+    visibility 0s linear;
+}
+
+.history-reveal-inner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .history-content {
   border-top: 1px solid var(--border);
-  transform-origin: top center;
+  opacity: 0.7;
+  transform: translateY(-8px);
+  transition:
+    transform 280ms var(--ease-emphasized),
+    opacity 180ms ease;
+}
+
+.downloads-panel.open .history-content {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .history-actions {
@@ -1455,7 +1524,6 @@ h2 {
   .transfer-progress,
   .warning-inline,
   .message,
-  .history-content,
   .log-panel {
     animation: reveal-up var(--motion-base) var(--ease-emphasized) both;
   }
@@ -1466,8 +1534,11 @@ h2 {
   }
 
   .batch-file-row,
-  .list-item,
-  .download-row {
+  .list-item {
+    animation: reveal-up 280ms var(--ease-emphasized) both;
+  }
+
+  .downloads-panel.open .download-row {
     animation: reveal-up 280ms var(--ease-emphasized) both;
   }
 
