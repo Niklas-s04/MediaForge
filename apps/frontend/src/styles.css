@@ -1699,3 +1699,6 @@ h2 {
     white-space: normal;
   }
 }
+.session-diagnostics { margin-top: 2rem; color: var(--muted, #94a3b8); font-size: 0.85rem; }
+.session-diagnostics summary { cursor: pointer; padding: 0.75rem 0; }
+.session-diagnostics .log-panel { max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

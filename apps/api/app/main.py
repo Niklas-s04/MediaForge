@@ -27,6 +27,7 @@ from .compression_goals import (
     summarize_profile_warning,
 )
 from .audit import audit_override
+from .diagnostics import install_diagnostics
 from .network_security import RemoteUrlPolicyError, validate_remote_url
 from .malware_scan import (
     MalwareDetectedError,
@@ -45,6 +46,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="MediaForge API", lifespan=lifespan)
+install_diagnostics(app)
 logger = logging.getLogger(__name__)
 
 

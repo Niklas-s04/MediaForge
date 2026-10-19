@@ -1,5 +1,7 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Modal from './Modal'
+import SessionDiagnostics from './SessionDiagnostics'
+import { diagnosticFetch as fetch, recordDiagnostic, recordServerDiagnostic } from './diagnostics'
 
 const LOGO_SRC = '/logo.png'
 
@@ -972,6 +974,9 @@ function App() {
   const [isInspecting, setIsInspecting] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>('dark')
   const [message, setMessage] = useState<string | null>(null)
+  useEffect(() => {
+    if (message) recordDiagnostic(`Oberfläche: ${message}`)
+  }, [message])
   const [convertFiles, setConvertFiles] = useState<BatchFile[]>([])
   const [batchId, setBatchId] = useState<string | null>(null)
   const [batchJobIds, setBatchJobIds] = useState<number[]>([])
@@ -1293,6 +1298,7 @@ function App() {
       const xhrResult = await new Promise<{ status: number; body: any }>((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         xhr.open('POST', `/api/jobs/convert-batch${suffix}`)
+        recordDiagnostic(`POST /api/jobs/convert-batch gestartet: ${convertFiles.length} Datei(en), ${totalSize} Bytes`)
         xhr.upload.onprogress = (event) => {
           const total = event.lengthComputable ? event.total : totalSize
           const loaded = event.loaded
@@ -1308,6 +1314,9 @@ function App() {
           })
         }
         xhr.onload = () => {
+          recordDiagnostic(`POST /api/jobs/convert-batch: HTTP ${xhr.status} (${Date.now() - startedAt} ms)`)
+          recordServerDiagnostic(xhr.getResponseHeader('X-MediaForge-Diagnostic'))
+          if (xhr.status >= 400) recordDiagnostic(`Upload-Fehler: ${xhr.responseText.slice(0, 16000)}`)
           setTransfer((current) => current?.phase === 'upload' ? {
             ...current,
             progress: 100,
@@ -1322,7 +1331,18 @@ function App() {
           }
           resolve({ status: xhr.status, body })
         }
-        xhr.onerror = () => reject(new Error('upload_failed'))
+        xhr.onerror = () => {
+          recordDiagnostic(`Upload-Netzwerkfehler nach ${Date.now() - startedAt} ms`)
+          reject(new Error('upload_failed'))
+        }
+        xhr.onabort = () => {
+          recordDiagnostic('Upload abgebrochen')
+          reject(new Error('upload_aborted'))
+        }
+        xhr.ontimeout = () => {
+          recordDiagnostic('Upload-Zeitüberschreitung')
+          reject(new Error('upload_timeout'))
+        }
         xhr.send(data)
       })
       if (xhrResult.status >= 200 && xhrResult.status < 300) {
@@ -1943,6 +1963,8 @@ function App() {
           </section>
         </aside>
       </section>
+
+      <SessionDiagnostics />
 
       {pendingWarning ? (
         <Modal title="Qualitätswarnung" onClose={() => setPendingWarning(null)} onConfirm={confirmPendingWarning} cancelLabel="Abbrechen" confirmLabel="Trotzdem starten">
