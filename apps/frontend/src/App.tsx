@@ -953,7 +953,10 @@ function App() {
   const [downloadAdvanced, setDownloadAdvanced] = useState<AdvancedValues>(defaultAdvanced)
   const [downloadInfo, setDownloadInfo] = useState<InspectInfo | null>(null)
   const [isInspecting, setIsInspecting] = useState(false)
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [theme, setTheme] = useState<'light' | 'dark'>(() =>
+    document.documentElement.dataset.theme === 'light' ? 'light' : 'dark',
+  )
+  const [manualTheme, setManualTheme] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   useEffect(() => {
     if (message) recordDiagnostic(`Oberfläche: ${message}`)
@@ -1045,11 +1048,21 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
       'content',
       theme === 'dark' ? '#141715' : '#f9f9f8',
     )
   }, [theme])
+
+  useEffect(() => {
+    if (manualTheme || !window.matchMedia) return
+    const preference = window.matchMedia('(prefers-color-scheme: light)')
+    const updateTheme = () => setTheme(preference.matches ? 'light' : 'dark')
+    updateTheme()
+    preference.addEventListener('change', updateTheme)
+    return () => preference.removeEventListener('change', updateTheme)
+  }, [manualTheme])
 
   useEffect(() => {
     if (!transfer?.jobId || transfer.phase === 'download') return
@@ -1602,7 +1615,10 @@ function App() {
           type="button"
           aria-label={theme === 'dark' ? 'Helles Design aktivieren' : 'Dunkles Design aktivieren'}
           aria-pressed={theme === 'dark'}
-          onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+          onClick={() => {
+            setManualTheme(true)
+            setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+          }}
         >
           <StudioIcon name={theme === 'dark' ? 'moon' : 'sun'} />
           <span className="sr-only">{theme === 'dark' ? 'Dunkel' : 'Hell'}</span>

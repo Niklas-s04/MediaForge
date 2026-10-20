@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-test('starts in light mode on the Stitch download screen', async ({ page }) => {
+test('follows the system theme until manually toggled', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = path === '/api/jobs'
@@ -28,9 +29,19 @@ test('starts in light mode on the Stitch download screen', async ({ page }) => {
   const themeToggle = page.locator('.theme-toggle');
   await expect(themeToggle).toHaveAttribute('aria-pressed', 'false');
   await expect(themeToggle).toContainText('Hell');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.reload();
+  await expect(themeToggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await themeToggle.click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#141715');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 
 });
 
