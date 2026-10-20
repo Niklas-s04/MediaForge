@@ -1,5 +1,7 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useId } from 'react'
 import Modal from './Modal'
+import CompressionPanel from './CompressionPanel'
 import SessionDiagnostics from './SessionDiagnostics'
 import { diagnosticFetch as fetch, recordDiagnostic, recordServerDiagnostic } from './diagnostics'
 
@@ -17,7 +19,7 @@ type Job = {
   expires_at?: string | null
 }
 
-type ActiveTab = 'download' | 'convert'
+type ActiveTab = 'download' | 'convert' | 'compress'
 type MediaFamily = 'video' | 'audio' | 'image' | 'document' | 'spreadsheet' | 'presentation' | 'pdf' | 'text'
 type QualityPreset = 'high' | 'balanced' | 'small'
 
@@ -254,8 +256,8 @@ function getStatusTone(status?: string) {
 }
 
 function StatusBadge({ status }: { status?: string }) {
-  const label = status || 'unknown'
-  return <span className={`status-badge ${getStatusTone(label)}`}>{label}</span>
+  const labels: Record<string, string> = { success: 'Fertig', completed: 'Fertig', running: 'In Arbeit', started: 'In Arbeit', queued: 'Wartet', waiting: 'Wartet', failed: 'Fehlgeschlagen', error: 'Fehler', cancelled: 'Abgebrochen', expired: 'Abgelaufen', deleted: 'Gelöscht', notfound: 'Nicht gefunden' }
+  return <span className={`status-badge ${getStatusTone(status)}`}>{labels[status || ''] || status || 'Unbekannt'}</span>
 }
 
 function EmptyState({ title, text }: { title: string; text: string }) {
@@ -352,7 +354,7 @@ function ProgressMeter({
         <strong>{indeterminate ? 'läuft' : `${safeProgress}%`}</strong>
       </div>
       <div className="progress-track">
-        <span style={{ width: `${safeProgress}%` }} />
+        <span style={{ transform: indeterminate ? undefined : `scaleX(${safeProgress / 100})` }} />
       </div>
       {eta ? <small>{eta}</small> : null}
     </div>
@@ -482,6 +484,10 @@ function FormatPicker({
   const [query, setQuery] = useState('')
   const [activeFamily, setActiveFamily] = useState<MediaFamily>(selectedFamily)
   const pickerRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const menuId = useId()
+  useEffect(() => { if (open) searchRef.current?.focus() }, [open])
   const selected = findFormat(catalog, selectedFamily, selectedFormat)
   const formats = catalog[activeFamily].filter((format) => {
     const haystack = `${format.label} ${format.text}`.toLowerCase()
@@ -504,8 +510,13 @@ function FormatPicker({
   }, [open, onOpenChange])
 
   return (
-    <div className="format-picker" ref={pickerRef}>
+    <div className="format-picker" ref={pickerRef} onKeyDown={event => {
+      if (event.key === 'Escape' && open) { event.preventDefault(); onOpenChange(false); triggerRef.current?.focus() }
+    }}>
       <button
+        ref={triggerRef}
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         className="format-button"
         type="button"
         onClick={() => {
@@ -517,10 +528,10 @@ function FormatPicker({
         <small>{familyLabels[selected.family]}</small>
       </button>
       {open ? (
-        <div className="format-menu">
+        <div className="format-menu" id={menuId} role="region" aria-label="Zielformat wählen">
           <label className="format-search">
-            <span>Search Format</span>
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="z. B. mp4, mp3, webp" />
+            <span>Format suchen</span>
+            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="z. B. mp4, mp3, webp" />
           </label>
           <div className="format-menu-body">
             <div className="format-categories">
@@ -536,6 +547,7 @@ function FormatPicker({
               ))}
             </div>
             <div className="format-results">
+              {!formats.length && <p className="format-empty" role="status">Kein passendes Format. Versuche einen anderen Suchbegriff.</p>}
               {formats.map((format) => (
                 <button
                   key={`${format.family}-${format.value}`}
@@ -545,6 +557,7 @@ function FormatPicker({
                     onSelect(format.family, format.value)
                     onOpenChange(false)
                     setQuery('')
+                    triggerRef.current?.focus()
                   }}
                 >
                   <strong>{format.label}</strong>
@@ -567,20 +580,23 @@ function QualitySelector({
   onChange: (value: QualityPreset) => void
 }) {
   return (
-    <div className="quality-row">
+    <>
+    <div className="quality-row" role="group" aria-label="Qualitätsziel">
       {qualityOptions.map((option) => (
         <button
           key={option.value}
           className={value === option.value ? 'active' : ''}
           data-testid={`quality-${option.value}`}
+          aria-pressed={value === option.value}
           type="button"
           onClick={() => onChange(option.value)}
         >
           <strong>{option.label}</strong>
-          <span>{option.text}</span>
         </button>
       ))}
     </div>
+    <p className="quality-description">{qualityOptions.find(option => option.value === value)?.text}</p>
+    </>
   )
 }
 
@@ -750,56 +766,6 @@ function AdvancedOptions({
   )
 }
 
-function ConversionCard({
-  catalog,
-  sourceTitle,
-  sourceMeta,
-  sourceFormat,
-  families,
-  selectedFamily,
-  selectedFormat,
-  pickerOpen,
-  onPickerOpen,
-  onSelect,
-}: {
-  catalog: Record<MediaFamily, FormatDef[]>
-  sourceTitle: string
-  sourceMeta: string
-  sourceFormat: string
-  families: MediaFamily[]
-  selectedFamily: MediaFamily
-  selectedFormat: string
-  pickerOpen: boolean
-  onPickerOpen: (open: boolean) => void
-  onSelect: (family: MediaFamily, format: string) => void
-}) {
-  return (
-    <div className="convert-card">
-      <div className="source-file">
-        <span className="file-icon">{sourceFormat.slice(0, 3)}</span>
-        <div>
-          <strong>{sourceTitle}</strong>
-          <span>{sourceMeta}</span>
-        </div>
-      </div>
-      <div className="convert-chain">
-        <span>Convert</span>
-        <span className="format-chip">{sourceFormat}</span>
-        <span className="arrow">-&gt;</span>
-        <FormatPicker
-          catalog={catalog}
-          families={families}
-          selectedFamily={selectedFamily}
-          selectedFormat={selectedFormat}
-          open={pickerOpen}
-          onOpenChange={onPickerOpen}
-          onSelect={onSelect}
-        />
-      </div>
-    </div>
-  )
-}
-
 function JobDetail({
   job,
   onDownload,
@@ -909,7 +875,7 @@ function JobDetail({
   }, [job?.id, onTerminal])
 
   if (!job) {
-    return <EmptyState title="Kein Auftrag ausgewählt" text="Wähle einen Auftrag aus, um Details und Logs zu sehen." />
+    return null
   }
 
   const isDownloadable = job.status === 'success' && !!job.output_path
@@ -918,7 +884,6 @@ function JobDetail({
     <section className="panel job-detail">
       <div className="panel-header compact">
         <div>
-          <p className="eyebrow">Details</p>
           <h2>Auftrag #{job.id}</h2>
         </div>
         <div className="detail-actions">
@@ -941,7 +906,7 @@ function JobDetail({
         </div>
       </div>
       <div className="detail-meta">
-        <span>{job.type === 'convert' ? 'Konvertierung' : 'Download'}</span>
+        <span>{job.type === 'compress' ? 'Komprimierung' : job.type === 'convert' ? 'Konvertierung' : 'Download'}</span>
         <span>{currentStep || job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet auf Verarbeitung')}</span>
         {isDownloadable ? <span>{formatExpiry(job.expires_at, now)}</span> : null}
       </div>
@@ -960,19 +925,35 @@ function JobDetail({
   )
 }
 
+
+function StudioIcon({ name }: { name: 'brand' | 'link' | 'search' | 'chevron' | 'download' | 'folder' | 'file' | 'sun' | 'moon' }) {
+  const paths = {
+    brand: 'm12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 0v9m8-4.5L12 12 4 7.5m8 4.5v9',
+    link: 'm10 13 4-4m-5 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m0 10a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-1 1',
+    search: 'm21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-12 0 3 3 5-5',
+    chevron: 'm9 6 6 6-6 6',
+    download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
+    folder: 'M3 7V4h6l3 3h9v3M3 7v13h16l3-10H7L3 20',
+    file: 'M14 3H5v18h14V8l-5-5Zm0 0v5h5M8 13h8m-8 4h5',
+    sun: 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z',
+    moon: 'M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11Z',
+  }
+  return <svg className="studio-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>
+}
+
 function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [activeTab, setActiveTab] = useState<ActiveTab>('convert')
+  const [activeTab, setActiveTab] = useState<ActiveTab>('download')
   const [url, setUrl] = useState('')
   const [downloadFamily, setDownloadFamily] = useState<MediaFamily>('video')
-  const [downloadFormat, setDownloadFormat] = useState('mkv')
+  const [downloadFormat, setDownloadFormat] = useState('mp4')
   const [downloadQuality, setDownloadQuality] = useState('best')
   const [downloadQualityPreset, setDownloadQualityPreset] = useState<QualityPreset>('balanced')
   const [downloadAdvanced, setDownloadAdvanced] = useState<AdvancedValues>(defaultAdvanced)
   const [downloadInfo, setDownloadInfo] = useState<InspectInfo | null>(null)
   const [isInspecting, setIsInspecting] = useState(false)
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark')
+  const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [message, setMessage] = useState<string | null>(null)
   useEffect(() => {
     if (message) recordDiagnostic(`Oberfläche: ${message}`)
@@ -1066,7 +1047,7 @@ function App() {
     document.documentElement.dataset.theme = theme
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
       'content',
-      theme === 'dark' ? '#080d16' : '#f5f7fb',
+      theme === 'dark' ? '#141715' : '#f9f9f8',
     )
   }, [theme])
 
@@ -1081,7 +1062,7 @@ function App() {
     setTransfer((current) => {
       if (!current || current.jobId !== job.id || current.phase === 'download') return current
       const nextProgress = job.progress || current.progress
-      const nextLabel = `${job.type === 'convert' ? 'Konvertierung' : 'Download'}: Auftrag #${job.id}`
+      const nextLabel = `${job.type === 'compress' ? 'Komprimierung' : job.type === 'convert' ? 'Konvertierung' : 'Download'}: Auftrag #${job.id}`
       if (current.progress === nextProgress && current.label === nextLabel) return current
       return {
         ...current,
@@ -1590,87 +1571,106 @@ function App() {
     if (dragDepthRef.current === 0) setIsDraggingFiles(false)
   }
 
-  const availableHeights = (downloadInfo?.formats || [])
-    .map((format) => format.height)
-    .filter((height): height is number => Boolean(height))
+
 
   return (
     <main className="app-shell">
+      <a className="skip-link" href="#tool-panel">Zum Inhalt</a>
       <header className="topbar">
+        <div className="topbar-inner">
         <div className="brand-lockup" aria-label="MediaForge">
-          <img className="brand-mark" src={LOGO_SRC} alt="" />
+          <span className="brand-symbol"><StudioIcon name="brand" /></span>
           <div>
-            <h1>MediaForge</h1>
-            <p>Downloads und Konvertierungen mit passenden Formaten und Feineinstellungen.</p>
+            <span className="brand-name">MediaForge</span>
           </div>
         </div>
+          <div className={`tab-bar ${activeTab}-active`} role="tablist" aria-label="Auftragstyp" onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+            const current = tabs.indexOf(document.activeElement as HTMLButtonElement)
+            const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+            tabs[index].focus(); tabs[index].click()
+          }}>
+            <button className={`tab-button ${activeTab === 'download' ? 'active' : ''}`} id="tab-download" aria-controls="tool-panel" tabIndex={activeTab === 'download' ? 0 : -1} role="tab" aria-selected={activeTab === 'download'} type="button" onClick={() => setActiveTab('download')}>Herunterladen</button>
+            <button className={`tab-button ${activeTab === 'convert' ? 'active' : ''}`} id="tab-convert" aria-controls="tool-panel" tabIndex={activeTab === 'convert' ? 0 : -1} role="tab" aria-selected={activeTab === 'convert'} type="button" onClick={() => setActiveTab('convert')}>Konvertieren</button>
+            <button className={`tab-button ${activeTab === 'compress' ? 'active' : ''}`} id="tab-compress" aria-controls="tool-panel" tabIndex={activeTab === 'compress' ? 0 : -1} role="tab" aria-selected={activeTab === 'compress'} type="button" onClick={() => setActiveTab('compress')}>Komprimieren</button>
+          </div>
+        <a className="jobs-nav" href="#jobs">Aufträge</a>
         <button
           className="theme-toggle"
           type="button"
+          aria-label={theme === 'dark' ? 'Helles Design aktivieren' : 'Dunkles Design aktivieren'}
           aria-pressed={theme === 'dark'}
           onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
         >
-          <span>{theme === 'dark' ? 'Dunkel' : 'Hell'}</span>
-          <i aria-hidden="true" />
+          <StudioIcon name={theme === 'dark' ? 'moon' : 'sun'} />
+          <span className="sr-only">{theme === 'dark' ? 'Dunkel' : 'Hell'}</span>
         </button>
+        </div>
       </header>
 
       <section className="main-layout">
         <div className="work-column">
-          <div className={`tab-bar ${activeTab}-active`} role="tablist" aria-label="Auftragstyp">
-            <button className={`tab-button ${activeTab === 'download' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'download'} type="button" onClick={() => setActiveTab('download')}>Download</button>
-            <button className={`tab-button ${activeTab === 'convert' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'convert'} type="button" onClick={() => setActiveTab('convert')}>Konvertieren</button>
-          </div>
+          <header className="page-heading">
+            <h1>{activeTab === 'download' ? 'Medien herunterladen' : activeTab === 'convert' ? 'Dateien konvertieren' : 'Dateien komprimieren'}</h1>
+            <p>{activeTab === 'download' ? 'Videos und Audio einfach herunterladen.' : activeTab === 'convert' ? 'Dateien in das passende Format umwandeln.' : 'Weniger Speicherplatz. Das passende Ergebnis.'}</p>
+          </header>
 
-          <section className="panel work-panel">
+
+          <section className="panel work-panel" id="tool-panel" role="tabpanel" tabIndex={-1} aria-labelledby={"tab-" + activeTab}>
+            <div hidden={activeTab !== 'compress'}><CompressionPanel jobs={jobs} onCreated={(ids) => { loadJobs(); setSelectedId(ids[0] || null) }} /></div>
+            {activeTab !== 'compress' && <>
             {activeTab === 'download' ? (
               <div className="tab-content" key="download">
-                <div className="panel-header">
-                  <div>
-                    <p className="eyebrow">Online-Quelle</p>
-                    <h2>Medium herunterladen</h2>
-                  </div>
-                </div>
-                <div className="url-row">
-                  <label className="field">
-                    <span>URL</span>
-                    <input placeholder="https://..." value={url} onChange={(e) => { setUrl(e.target.value); setDownloadInfo(null) }} />
+                <form className="url-row" onSubmit={(event) => { event.preventDefault(); analyzeDownload() }}>
+                  <label className="url-input field">
+                    <span className="sr-only">Medien-URL</span>
+                    <StudioIcon name="link" />
+                    <input type="url" required placeholder="Medien-URL einfügen" value={url} onChange={(e) => { setUrl(e.target.value); setDownloadInfo(null) }} />
                   </label>
-                  <button className="button secondary" type="button" onClick={analyzeDownload}>{isInspecting ? 'Analysiere...' : 'Analysieren'}</button>
-                </div>
+                  <button className="button secondary" type="submit" disabled={isInspecting}><StudioIcon name="search" />{isInspecting ? 'Wird geprüft…' : 'Link prüfen'}</button>
+                </form>
                 {downloadInfo ? (
                   <div className="inspect-result">
-                    {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" /> : <img className="media-thumb" src={LOGO_SRC} alt="" />}
+                    <div className="preview-media">
+                      {downloadInfo.thumbnail ? <img src={downloadInfo.thumbnail} alt="" width={172} height={97} onError={() => setDownloadInfo(current => current ? { ...current, thumbnail: null } : current)} /> : <img className="media-thumb" src={LOGO_SRC} alt="" width={172} height={97} />}
+                      {Boolean(downloadInfo.duration && downloadInfo.duration > 0) && <span className="preview-duration">{formatDuration(downloadInfo.duration)}</span>}
+                    </div>
                     <div>
-                      <strong>{downloadInfo.title || 'Medium erkannt'}</strong>
+                      <span className="detected-label">Erkannt</span>
+                      <strong title={downloadInfo.title || undefined}>{downloadInfo.title || 'Medium erkannt'}</strong>
                       <span>{[downloadInfo.uploader, formatDuration(downloadInfo.duration)].filter(Boolean).join(' - ') || 'Bereit für den Download'}</span>
-                      {availableHeights.length ? <small>Videoqualitäten bis {Math.max(...availableHeights)}p erkannt</small> : null}
+
                     </div>
                   </div>
                 ) : null}
-                <ConversionCard
-                  catalog={downloadCatalog}
-                  sourceTitle={downloadInfo?.title || 'Online-Medium'}
-                  sourceMeta={url || 'URL einfügen und optional analysieren'}
-                  sourceFormat="WEB"
-                  families={['video', 'audio']}
-                  selectedFamily={downloadFamily}
-                  selectedFormat={downloadFormat}
-                  pickerOpen={pickerOpen === 'download'}
-                  onPickerOpen={(open) => setPickerOpen(open ? 'download' : null)}
-                  onSelect={(family, format) => {
-                    setDownloadFamily(family)
-                    setDownloadFormat(format)
-                  }}
-                />
-                <div className="options-block">
-                  <div className="options-title">
+                <div className="download-selectors">
+                  <label className="field">
+                    <span>Format</span>
+                    <select value={`${downloadFamily}:${downloadFormat}`} onChange={(event) => {
+                      const [family, format] = event.target.value.split(':')
+                      setDownloadFamily(family as MediaFamily)
+                      setDownloadFormat(format)
+                    }}>
+                      {(['video', 'audio'] as const).map(family => <optgroup key={family} label={familyLabels[family]}>
+                        {downloadCatalog[family].map(format => <option key={format.value} value={`${family}:${format.value}`}>{format.label} ({familyLabels[family]})</option>)}
+                      </optgroup>)}
+                    </select>
+                  </label>
+                  <label className="field">
                     <span>Qualität</span>
-                    <button className="link-button" type="button" onClick={() => setAdvancedOpen((open) => !open)}>
-                      {advancedOpen ? 'Optionen ausblenden' : 'Detaillierte Optionen'}
-                    </button>
-                  </div>
-                  <QualitySelector value={downloadQualityPreset} onChange={setDownloadQualityPreset} />
+                    <select value={downloadQuality} onChange={event => setDownloadQuality(event.target.value)} disabled={downloadFamily === 'audio'}>
+                      {downloadQualities.map(quality => <option key={quality.value} value={quality.value}>{quality.value === 'best' ? 'Original (Beste verfügbare)' : quality.label}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div className="download-options">
+                  <button className="advanced-toggle" type="button" aria-expanded={advancedOpen} aria-controls="download-advanced" onClick={() => setAdvancedOpen(open => !open)}>
+                    <StudioIcon name="chevron" /><span>Erweiterte Einstellungen</span>
+                  </button>
+                  <div id="download-advanced" hidden={!advancedOpen}>
+                  {advancedOpen && <QualitySelector value={downloadQualityPreset} onChange={setDownloadQualityPreset} />}
                   {advancedOpen ? (
                     <AdvancedOptions
                       family={downloadFamily}
@@ -1684,13 +1684,13 @@ function App() {
                       setDownloadQuality={setDownloadQuality}
                     />
                   ) : null}
+                  </div>
                 </div>
               </div>
             ) : (
               <div className="tab-content" key="convert">
                 <div className="panel-header">
                   <div>
-                    <p className="eyebrow">Lokale Datei</p>
                     <h2>Dateien im Batch konvertieren</h2>
                   </div>
                 </div>
@@ -1795,9 +1795,7 @@ function App() {
                       )
                     })}
                   </div>
-                ) : (
-                  <EmptyState title="Noch keine Dateien ausgewählt" text="Jede Datei kann im Batch ein eigenes Zielformat erhalten." />
-                )}
+                ) : null}
                 <div className="options-block">
                   <div className="options-title">
                     <span>Gemeinsame Qualitätseinstellungen</span>
@@ -1823,8 +1821,9 @@ function App() {
             {compressionWarning ? <div className="warning-inline"><strong>Hinweis:</strong> {compressionWarning}</div> : null}
 
             <div className="panel-footer">
+              {activeTab === 'download' && <span className="destination-note" title="Fertige Dateien können aus der Auftragsliste im Browser gespeichert werden."><StudioIcon name="folder" />Browser-Download</span>}
               <button className="button primary" data-testid="create-job" type="button" onClick={() => (activeTab === 'download' ? createDownloadJob() : createConvertJob())}>
-                {activeTab === 'download' ? 'Download starten' : `${convertFiles.length || ''} Konvertierung${convertFiles.length === 1 ? '' : 'en'} starten`}
+                {activeTab === 'download' ? <><StudioIcon name="download" />Herunterladen</> : `${convertFiles.length || ''} Konvertierung${convertFiles.length === 1 ? '' : 'en'} starten`}
               </button>
               {activeTab === 'convert' && batchId ? (
                 <button className="button secondary" type="button" disabled={!batchFinished || batchSuccessCount === 0} onClick={downloadBatch}>
@@ -1842,23 +1841,22 @@ function App() {
                 />
               </div>
             ) : null}
-            {message ? <div className="message">{message}</div> : null}
+            {message ? <div className="message" role="status">{message}</div> : null}
+            </>}
           </section>
 
-          <JobDetail job={selectedJob} onDownload={downloadJob} onDelete={deleteJob} onExtend={extendJob} onTerminal={loadJobs} now={now} />
+
         </div>
 
-        <aside className="side-column">
-          <section className="panel queue-panel">
+        <aside className="side-column" aria-label="Aufträge">
+          <section className="panel queue-panel" id="jobs" tabIndex={-1}>
             <div className="panel-header compact">
-              <div>
-                <p className="eyebrow">Aufträge</p>
-                <h2>{jobs.length} insgesamt</h2>
-              </div>
+              <h2>Aktuelle Aufträge</h2>
+              <span className="count-label">{activeJobs} aktiv</span>
               <button className="button ghost" type="button" onClick={loadJobs}>Aktualisieren</button>
             </div>
             {jobs.length === 0 ? (
-              <EmptyState title="Noch keine Aufträge" text="Starte einen Download oder lade eine Datei zur Konvertierung hoch." />
+              <EmptyState title="Noch keine Aufträge" text="Gestartete Aufträge erscheinen hier." />
             ) : (
               <div className="item-list">
                 {jobs.map((job, index) => (
@@ -1870,23 +1868,25 @@ function App() {
                     onClick={() => setSelectedId(job.id)}
                   >
                     <span className="item-main">
-                      <strong>#{job.id} {job.type === 'convert' ? 'Konvertierung' : 'Download'}</strong>
+                      <strong><StudioIcon name="file" />{job.output_path ? fallbackDownloadName(job) : `Auftrag #${job.id} · ${job.type === 'compress' ? 'Komprimierung' : job.type === 'convert' ? 'Konvertierung' : 'Download'}`}</strong>
                       <small>{job.current_step || (job.output_path ? fallbackDownloadName(job) : 'Wartet')}</small>
                       {['queued', 'running'].includes((job.status || '').toLowerCase()) ? (
                         <span className="list-progress" aria-label={`Fortschritt ${job.progress || 0}%`}>
                           <i
                             className={(job.progress || 0) <= 0 ? 'indeterminate' : ''}
-                            style={{ width: `${Math.max(0, Math.min(100, job.progress || 0))}%` }}
+                            style={{ transform: (job.progress || 0) <= 0 ? undefined : `scaleX(${Math.max(0, Math.min(100, job.progress || 0)) / 100})` }}
                           />
                         </span>
                       ) : null}
                     </span>
-                    <StatusBadge status={job.status} />
+                    {['queued', 'running'].includes(job.status) ? <span className="job-percentage">{Math.round(job.progress || 0)} %</span> : <StatusBadge status={job.status} />}
                   </button>
                 ))}
               </div>
             )}
           </section>
+
+          {selectedJob && <JobDetail job={selectedJob} onDownload={downloadJob} onDelete={deleteJob} onExtend={extendJob} onTerminal={loadJobs} now={now} />}
 
           <section className={`panel downloads-panel ${historyOpen ? 'open' : ''}`}>
             <button
@@ -1898,7 +1898,6 @@ function App() {
               onClick={() => setHistoryOpen((open) => !open)}
             >
               <span>
-                <span className="eyebrow">Chronik</span>
                 <strong>Fertige Dateien</strong>
               </span>
               <span className="history-summary">
@@ -1949,7 +1948,7 @@ function App() {
                               <small>Auftrag #{job.id}</small>
                               <small>{formatExpiry(job.expires_at, now)}</small>
                             </span>
-                            <button className="button secondary" type="button" onClick={() => downloadJob(job)}>Download</button>
+                            <button className="button secondary" type="button" onClick={() => downloadJob(job)}><span className="tab-number">01</span> Download</button>
                             <button className="button secondary" type="button" onClick={() => extendJob(job)}>Verlängern</button>
                             <button className="button ghost" type="button" onClick={() => deleteJob(job)}>Löschen</button>
                           </div>
@@ -1964,7 +1963,10 @@ function App() {
         </aside>
       </section>
 
-      <SessionDiagnostics />
+      <footer className="studio-footer">
+        <div className="studio-footer-inner"><span>MediaForge</span><a href="#session-log">Protokolle</a></div>
+        <div id="session-log"><SessionDiagnostics /></div>
+      </footer>
 
       {pendingWarning ? (
         <Modal title="Qualitätswarnung" onClose={() => setPendingWarning(null)} onConfirm={confirmPendingWarning} cancelLabel="Abbrechen" confirmLabel="Trotzdem starten">

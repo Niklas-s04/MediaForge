@@ -1,6 +1,6 @@
-﻿import { test, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-test('starts in dark mode on the converter tab', async ({ page }) => {
+test('starts in light mode on the Stitch download screen', async ({ page }) => {
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = path === '/api/jobs'
@@ -21,20 +21,20 @@ test('starts in dark mode on the converter tab', async ({ page }) => {
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
 
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#080d16');
-  await expect(page.getByRole('tab', { name: 'Konvertieren' })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('heading', { name: 'Dateien im Batch konvertieren' })).toBeVisible();
-
-  const themeToggle = page.locator('.theme-toggle');
-  await expect(themeToggle).toHaveAttribute('aria-pressed', 'true');
-  await expect(themeToggle).toContainText('Dunkel');
-  await themeToggle.click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f5f7fb');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f9f9f8');
+  await expect(page.getByRole('tab', { name: 'Herunterladen' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('heading', { name: 'Medien herunterladen' })).toBeVisible();
+  const themeToggle = page.locator('.theme-toggle');
+  await expect(themeToggle).toHaveAttribute('aria-pressed', 'false');
+  await expect(themeToggle).toContainText('Hell');
+  await themeToggle.click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#141715');
+
 });
 
-test('uses interface motion while honoring reduced-motion preferences', async ({ page }) => {
+test('keeps the Stitch navigation free of decorative motion', async ({ page }) => {
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname;
     route.fulfill({
@@ -54,10 +54,10 @@ test('uses interface motion while honoring reduced-motion preferences', async ({
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
-  await expect(page.locator('.work-panel')).toHaveCSS('animation-name', 'reveal-up');
+  expect(await page.locator('.tab-bar').evaluate(el => getComputedStyle(el, '::before').display)).toBe('none');
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect(page.locator('.work-panel')).toHaveCSS('animation-name', 'none');
+  expect(await page.locator('.tab-bar').evaluate(el => getComputedStyle(el, '::before').transitionDuration)).toBe('0s');
 });
 
 test('confirms small quality warning through force job creation', async ({ page }) => {
@@ -140,8 +140,9 @@ test('confirms small quality warning through force job creation', async ({ page 
   await page.waitForSelector('text=MediaForge', { timeout: 60000 });
 
 
-  await page.getByRole('tab', { name: 'Download' }).click();
-  await page.fill('input[placeholder="https://..."]', 'https://example.invalid/sample');
+  await page.getByRole('tab', { name: 'Herunterladen' }).click();
+  await page.fill('input[placeholder="Medien-URL einfügen"]', 'https://example.invalid/sample');
+  await page.getByRole('button', { name: 'Erweiterte Einstellungen' }).click();
   await page.click('[data-testid="quality-small"]');
 
   await expect(page.locator('.warning-inline')).toContainText('Aggressive');
@@ -155,7 +156,7 @@ test('confirms small quality warning through force job creation', async ({ page 
   expect(jobRequests).toHaveLength(2);
   expect(jobRequests[0].force).toBeNull();
   expect(jobRequests[0].body.input.output_kind).toBe('video');
-  expect(jobRequests[0].body.input.output_format).toBe('mkv');
+  expect(jobRequests[0].body.input.output_format).toBe('mp4');
   expect(jobRequests[0].body.input.quality_preset).toBe('small');
   expect(jobRequests[0].body.input.compression_profile).toBe('small');
   expect(jobRequests[1].force).toBe('true');
@@ -207,7 +208,7 @@ test('clears selected local files after successful batch conversion', async ({ p
 
   await expect(page.locator('text=Batch gestartet: 1 Konvertierungen')).toBeVisible();
   await expect(page.locator('text=sample.wav')).toHaveCount(0);
-  await expect(page.locator('text=Dateien auswählen oder hier ablegen')).toBeVisible();
+  await expect(page.locator('label[for="file-upload"]')).toBeVisible();
 });
 
 test('controls metadata preservation separately for each supported batch file', async ({ page }) => {
@@ -428,7 +429,7 @@ test('rejects incompatible local files before upload', async ({ page }) => {
   });
 
   await expect(page.locator('text=Nicht kompatibel: layout.psd')).toBeVisible();
-  await expect(page.locator('text=Dateien auswählen oder hier ablegen')).toBeVisible();
+  await expect(page.locator('label[for="file-upload"]')).toBeVisible();
 
   await page.click('button:has-text("Konvertierungen starten")');
   await expect(page.locator('text=Bitte mindestens eine Datei auswählen.')).toBeVisible();
@@ -474,7 +475,7 @@ test('keeps streamed job logs stable across job polling refreshes', async ({ pag
 
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
-  await page.click('button:has-text("#321 Konvertierung")');
+  await page.locator('.item-list').getByRole('button', { name: /job-321.mp3/ }).click();
 
   await expect(page.locator('.log-panel')).toHaveCount(0);
   await page.getByRole('button', { name: /Details \/ Log anzeigen/ }).click();
@@ -577,7 +578,7 @@ test('downloads finished output with unknown response length', async ({ page }) 
   await expect(page.locator('.transfer-progress')).toContainText('100%');
 });
 
-test('closes the format picker when clicking outside of it', async ({ page }) => {
+test('offers the API format catalog in the native download selector', async ({ page }) => {
   await page.route('**/api/options', (route) => {
     route.fulfill({
       status: 200,
@@ -600,16 +601,13 @@ test('closes the format picker when clicking outside of it', async ({ page }) =>
   await page.goto('/');
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
 
-  await page.getByRole('tab', { name: 'Download' }).click();
-  await page.getByRole('button', { name: /MP4 Video/ }).click();
-  await expect(page.locator('.format-menu')).toBeVisible();
-  await expect(page.getByRole('button', { name: /WMV/ })).toBeVisible();
-
-  await page.locator('.format-categories').getByRole('button', { name: 'Audio' }).click();
-  await expect(page.getByRole('button', { name: /ALAC/ })).toBeVisible();
-
-  await page.locator('.url-row input').click();
-  await expect(page.locator('.format-menu')).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Herunterladen' }).click();
+  const format = page.getByRole('combobox', { name: 'Format', exact: true });
+  await expect(format.locator('option[value="video:wmv"]')).toHaveCount(1);
+  await expect(format.locator('option[value="audio:alac"]')).toHaveCount(1);
+  await format.selectOption('audio:alac');
+  await expect(format).toHaveValue('audio:alac');
+  await expect(page.getByRole('combobox', { name: 'Qualität', exact: true })).toBeDisabled();
 });
 
 test('hides expired jobs from the frontend lists', async ({ page }) => {
@@ -643,7 +641,7 @@ test('hides expired jobs from the frontend lists', async ({ page }) => {
   await page.waitForFunction(() => (window as any).__APP_READY__ === true, null, { timeout: 60000 });
 
   await expect(page.getByText('#11 Konvertierung')).toHaveCount(0);
-  await expect(page.getByText('#12 Konvertierung')).toBeVisible();
+  await expect(page.locator('.item-list').getByText('job-12.mp3')).toBeVisible();
   await expect(page.getByTestId('history-toggle').locator('.count-label')).toHaveText('1');
   await page.getByTestId('history-toggle').click();
   await expect(page.getByText('Auftrag #12')).toBeVisible();

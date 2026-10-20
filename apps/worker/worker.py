@@ -1,3 +1,4 @@
+from apps.worker.compress import compress_file
 from celery import Celery
 import os
 import time
@@ -852,6 +853,8 @@ def _build_media_command(
         )
         crf = _int_option(options.get("crf"), settings["crf"], minimum=0, maximum=51)
         cmd += ["-c:v", video_codec, "-c:a", audio_codec]
+        if options.get("audio_bitrate"):
+            cmd += ["-b:a", str(options["audio_bitrate"])]
         if video_codec in CRF_VIDEO_CODECS:
             cmd += ["-crf", str(crf)]
         elif output_format not in {"mpg", "mpeg", "ts", "m2ts", "mts", "vob"}:
@@ -1229,6 +1232,39 @@ def process_convert(self, job_id: int):
             os.makedirs(outdir, exist_ok=True)
 
             original_name = input_obj.get("original_filename") or input_path
+            if input_obj.get("operation") == "compress":
+                from apps.api.app.compression import normalize_compression
+                options = normalize_compression(original_name, input_obj)
+                options["original_filename"] = original_name
+                fmt = options["output_format"]
+                outpath = _working_output_path(outdir, job_id, fmt)
+                _set_job_progress(session, job, 35, "Datei komprimieren", force=True)
+                def run_media():
+                    if options["source_family"] == "image" and _source_extension(input_path) == "svg":
+                        _run_svg_to_image_conversion(input_path, outpath, fmt, options["quality_preset"], options["strip_metadata"], options)
+                        return
+                    cmd = _build_media_command(input_path, outpath, options["source_family"], fmt,
+                                               options["quality_preset"], options["strip_metadata"], options)
+                    _run_ffmpeg_with_progress(cmd, session=session, job=job, input_path=input_path,
+                                              start_progress=35, end_progress=95, step="Komprimierung läuft")
+                compress_file(input_path, outpath, options, run_media)
+                if not _scan_job_file(session, job, outpath, "compressed output"):
+                    return
+                before, after = os.path.getsize(input_path), os.path.getsize(outpath)
+                saving = round((1 - after / before) * 100, 1) if before else 0
+                stem = _safe_stem(original_name, f"job-{job_id}")
+                if fmt in {"zip", "gz", "xz"}:
+                    stem = _safe_stem(original_name + ".archive", f"job-{job_id}")
+                job.output_path = _publish_output(outpath, outdir, stem, fmt)
+                job.progress = 100
+                job.status = "success"
+                job.current_step = f"{before:,} → {after:,} Bytes · {saving}% kleiner" if saving > 0 else f"{before:,} → {after:,} Bytes · Keine Ersparnis: Quelle bereits effizient komprimiert"
+                job.finished_at = datetime.datetime.utcnow()
+                job.expires_at = _output_expiry(job.finished_at)
+                session.add(job)
+                session.commit()
+                return {"output": job.output_path}
+
             quality = _quality_preset(input_obj)
             try:
                 source_family = resolve_compression_family(

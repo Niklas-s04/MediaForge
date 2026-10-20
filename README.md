@@ -10,6 +10,8 @@ The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it 
 
 - Download online media and convert it to common audio or video formats.
 - Convert multiple uploaded audio, video, image, PDF, Office and OpenDocument files in one batch.
+- Compress mixed batches in a dedicated workspace with independent settings for every file.
+- Optimize media and PDFs, repack modern Office/OpenDocument/EPUB files without changing their contents, or archive any file as ZIP, GZIP or XZ.
 - Choose the target format separately for every file, download results individually or bundle a completed batch as ZIP.
 - Preserve or remove metadata separately for each file when the selected source/target combination supports it.
 - Keep the original base filename for converted results; collisions use ` (2)`, ` (3)` and so on instead of job IDs.
@@ -22,6 +24,37 @@ The committed app logo lives at `apps/frontend/public/logo.png`. Vite serves it 
 - Scan uploaded files, remote downloads and converted outputs with ClamAV before processing or release.
 
 The default output formats are MKV for video, PNG for images and MP3 for audio.
+
+## Compression workspace
+
+The **Komprimieren** tab accepts up to 100 files per batch. Choose a target for each file:
+
+| Source | Compression targets | Controls |
+| --- | --- | --- |
+| Video | MP4, WebM, MKV | Quality preset, CRF, maximum width, frame rate, audio bitrate, metadata removal |
+| Audio | Opus, MP3, M4A, FLAC | Quality preset, bitrate, channels, supported sample rates, metadata removal |
+| Still images | WebP, AVIF, JPG, PNG | Quality preset, maximum width, image quality, metadata removal |
+| PDF | PDF | Quality preset and image resolution from 72 to 300 DPI |
+| DOCX, XLSX, PPTX, DOCM, XLSM, PPTM, ODT, ODS, ODP, EPUB | Original format | Lossless package recompression, levels 1, 6 and 9 |
+| Any file, including legacy Office, text, code and archives | ZIP, GZIP, XZ | Lossless archive compression, levels 1, 6 and 9 |
+
+GIF, WebP and APNG inputs default to archives so animations are not silently flattened.
+Other image conversions produce a single frame. PDF optimization may change signatures
+or interactive features; use an archive when exact preservation matters. Native Office
+optimization preserves package entry contents, including embedded images and macros.
+It does not downsample embedded images. Already compressed inputs can yield larger results;
+the completed job reports original/output sizes and actual savings rather than promising
+a target size. Outputs are available individually, as a batch ZIP, and in the shared history.
+
+Compression uses the existing scanned upload/worker/download lifecycle and retention policy.
+The batch endpoint accepts `operation=compress` with per-file JSON `settings`; omitting the
+operation preserves conversion behavior. No database migration is required.
+PDF compression requires Ghostscript, now included in the worker Dockerfile: rebuild the
+worker image when deploying this update. Local development also needs Ghostscript on PATH.
+
+The refreshed interface has light/dark themes, responsive layouts, keyboard focus states,
+CSS transitions and reduced-motion support. Review evidence and verification boundaries
+are documented in [docs/design-overhaul-review.md](docs/design-overhaul-review.md).
 
 ## Supported Output Formats
 

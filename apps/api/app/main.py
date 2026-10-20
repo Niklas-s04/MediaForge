@@ -1,3 +1,4 @@
+from .compression import normalize_compression
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
@@ -704,7 +705,7 @@ def validate_compression_warning(
 def dispatch_job(job: models.Job):
     if job.type == "download":
         celery_app.send_task("worker.process_download_and_convert", args=[job.id])
-    elif job.type == "convert":
+    elif job.type in {"convert", "compress"}:
         celery_app.send_task("worker.process_convert", args=[job.id])
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported job type '{job.type}'")
@@ -908,6 +909,7 @@ def create_convert_batch_jobs(
     files: list[UploadFile] = File(...),
     settings: str = Form(...),
     preset: str = Form("default"),
+    operation: str = Form("convert"),
     compression_profile: str = Form("balanced"),
     quality_preset: str | None = Form(None),
     strip_metadata: bool = Form(False),
@@ -937,10 +939,21 @@ def create_convert_batch_jobs(
     if not isinstance(item_settings, list) or len(item_settings) != len(files):
         raise HTTPException(status_code=400, detail="Batch settings must match the uploaded files")
 
+    operation = operation if isinstance(operation, str) else "convert"
+    if operation not in {"convert", "compress"}:
+        raise HTTPException(status_code=400, detail="Unknown operation")
     normalized_items = []
     for file, item in zip(files, item_settings):
         if not isinstance(item, dict):
             raise HTTPException(status_code=400, detail="Invalid settings for a batch item")
+        if operation == "compress":
+            try:
+                input_obj = normalize_compression(file.filename or "file.bin", item)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            input_obj.update(original_filename=file.filename, mime_type=file.content_type)
+            normalized_items.append(input_obj)
+            continue
         item_preserve_metadata = item.get("preserve_metadata")
         options = normalize_convert_options(
             file=file,
@@ -1007,7 +1020,7 @@ def create_convert_batch_jobs(
         for input_obj, upload_path in zip(normalized_items, stored_paths):
             input_obj["file_path"] = upload_path
             input_obj["batch_id"] = batch_id
-            job = models.Job(type="convert", input=input_obj)
+            job = models.Job(type=operation, input=input_obj)
             session.add(job)
             jobs.append(job)
         session.commit()

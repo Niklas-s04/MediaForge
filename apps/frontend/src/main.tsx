@@ -16,3 +16,6 @@ setTimeout(() => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(window as any).__APP_READY__ = true
 }, 0)
+
+import './workshop.css'
+import './studio.css'

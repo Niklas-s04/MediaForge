@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-20T10:13:03.9481045+02:00",
+  "title": "Design System: MediaForge Self-Hosted Studio",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Forest green" },
+      "background": { "role": "neutral", "displayName": "Warm near-white" },
+      "dark-primary": { "role": "primary", "displayName": "Dark-theme action green" }
+    },
+    "typographyMeta": {
+      "technical": { "displayName": "Technical metadata", "purpose": "Destinations, counts, percentages, and logs." }
+    },
+    "shadows": [
+      { "name": "work-panel", "value": "0 1px 2px rgb(0 0 0 / .04)", "purpose": "Subtle separation of the work panel." },
+      { "name": "format-menu", "value": "0 8px 24px -4px rgb(0 0 0 / .16)", "purpose": "Floating format menu." }
+    ],
+    "motion": [
+      { "name": "studio-controls", "value": "none", "purpose": "Immediate input, select, navigation, button, theme, and progress state changes." }
+    ],
+    "breakpoints": [
+      { "name": "wrapped-navigation", "value": "760px" },
+      { "name": "stacked-fields", "value": "480px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Solid green action with a visible keyboard focus ring.",
+      "html": "<button class=\"ds-primary\">Download starten</button>",
+      "css": ".ds-primary{background:var(--primary,#284e3a);color:var(--on-primary,#fff);border:0;border-radius:4px;min-height:40px;padding:0 24px;font:500 13px Geist,'Segoe UI',sans-serif}.ds-primary:hover{background:var(--primary-hover,#103725)}.ds-primary:focus-visible{outline:2px solid var(--focus-ring,#406651);outline-offset:3px}"
+    },
+    {
+      "name": "Secondary action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Quiet neutral utility action.",
+      "html": "<button class=\"ds-secondary\">Analysieren</button>",
+      "css": ".ds-secondary{background:var(--surface-soft,#f3f4f2);color:var(--text,#1a1c1b);border:1px solid transparent;border-radius:4px;min-height:40px;padding:0 16px;font:500 13px Geist,'Segoe UI',sans-serif}.ds-secondary:hover{background:var(--border,#e2e3e1)}.ds-secondary:focus-visible{outline:2px solid var(--focus-ring,#406651);outline-offset:3px}"
+    },
+    {
+      "name": "Text field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Soft neutral field with explicit focus treatment.",
+      "html": "<input class=\"ds-field\" aria-label=\"Medien-URL\" placeholder=\"Medien-URL eingeben\">",
+      "css": ".ds-field{min-height:36px;padding:0 .85rem;background:var(--surface-soft,#f3f4f2);color:var(--text,#1a1c1b);border:1px solid transparent;border-radius:4px;font:13px Geist,'Segoe UI',sans-serif}.ds-field::placeholder{color:#667068}.ds-field:focus{border-color:var(--focus-ring,#406651);outline:1px solid var(--focus-ring,#406651)}.ds-field:focus-visible{outline:2px solid var(--focus-ring,#406651);outline-offset:3px}"
+    },
+    {
+      "name": "Navigation item",
+      "kind": "nav",
+      "description": "Compact navigation with an underlined active item.",
+      "html": "<nav aria-label=\"Werkzeuge\"><button class=\"ds-tab\" aria-current=\"page\">Download</button></nav>",
+      "css": ".ds-tab{background:transparent;color:var(--text,#1a1c1b);border:0;border-bottom:1px solid var(--primary,#284e3a);border-radius:0;min-height:30px;padding:4px 0;font:500 13px Geist,'Segoe UI',sans-serif}.ds-tab:hover{color:var(--primary-dark,#103725)}.ds-tab:focus-visible{outline:2px solid var(--focus-ring,#406651);outline-offset:3px}"
+    },
+    {
+      "name": "Work panel",
+      "kind": "card",
+      "refersTo": "work-panel",
+      "description": "Restrained surface containing the active workflow.",
+      "html": "<section class=\"ds-panel\"><h2>Download</h2><p>Browser-Download</p></section>",
+      "css": ".ds-panel{background:var(--surface,#fff);color:var(--text,#1a1c1b);border:0;border-radius:8px;padding:20px;box-shadow:0 1px 2px rgb(0 0 0 / .04);font:14px/1.5 Geist,'Segoe UI',sans-serif}.ds-panel h2{margin:0;font-size:16px;font-weight:600}.ds-panel p{color:var(--muted,#414843);font:12px 'JetBrains Mono',monospace}"
+    }
+  ],
+  "narrative": {
+    "overview": "The supplied MediaForge Self-Hosted Studio light screen establishes the composition. Forest green actions, restrained neutral surfaces, compact Geist typography, and technical monospace metadata reproduce that authority.",
+    "keyCharacteristics": ["Centered work column", "Jobs below the active workflow", "Shared geometry across themes", "Immediate state changes"],
+    "rules": [
+      { "name": "The Contrast Rule", "body": "Use the darker dark-primary fill for white-label buttons; reserve dark-accent for emphasis and status.", "section": "colors" }
+    ],
+    "dos": ["Do retain the supplied light screen's composition.", "Do preserve real states, accessible labels, and visible keyboard focus."],
+    "donts": ["Don't use the test thumbnail in production.", "Don't invent unsupported account, settings, or filesystem-destination interactions."]
+  }
+}
