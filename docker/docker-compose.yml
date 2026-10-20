@@ -29,7 +29,7 @@ services:
       - ../data:/data
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+      - /tmp:rw,noexec,nosuid,nodev,size=${API_TMPFS_SIZE:-4g},mode=1777
     cap_drop:
       - ALL
     security_opt:
