@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "geist",
+        "createdAt": "2026-10-20T19:14:48.694Z",
+        "reason": "Project DESIGN.md explicitly specifies Geist for headline, title, body and label typography; preserve the documented Stitch design system."
+      }
+    ]
+  }
+}
