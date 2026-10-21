@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "notes": "## Komprimierung — Risiken & Validierung",
   "families": {
     "audio": {
       "description": "Audio compression profiles for size-first delivery.",

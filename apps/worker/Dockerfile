@@ -23,7 +23,6 @@ RUN pip install --no-cache-dir -r apps/worker/requirements.txt
 
 COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker
-COPY docs ./docs
 
 RUN groupadd --gid 10001 mediaforge \
 	&& useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin mediaforge \

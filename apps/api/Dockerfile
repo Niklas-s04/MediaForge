@@ -18,7 +18,6 @@ COPY apps/api/requirements.txt ./apps/api/requirements.txt
 RUN pip install --no-cache-dir -r apps/api/requirements.txt
 
 COPY apps/api ./apps/api
-COPY docs ./docs
 COPY --from=frontend-build /src/apps/frontend/dist ./static
 
 RUN groupadd --gid 10001 mediaforge \
