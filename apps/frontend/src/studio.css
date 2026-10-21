@@ -109,8 +109,8 @@ input:focus, select:focus { box-shadow: none; border-color: var(--focus-ring); o
 .list-progress i { background: var(--accent); border-radius: 2px; transition: none; }
 .job-percentage { position: absolute; top: 12px; right: 6px; font: 12px 'JetBrains Mono', monospace; color: var(--muted); }
 .empty-state, .queue-panel > .empty-state { margin: 0; padding: 24px 18px; background: var(--surface); border-radius: 8px; }
-.downloads-panel { padding: 0 4px; border: 0; background: transparent; }
-.history-toggle { min-height: 32px; }
+.downloads-panel { padding: 0 4px; border: 0; background: transparent; overflow: visible; }
+.history-toggle { min-height: 44px; padding: 10px 16px; border-radius: 4px; overflow: visible; }
 .history-toggle strong { font-size: 13px; color: var(--muted); }
 .history-content { padding-top: 12px; }
 .job-detail { background: var(--surface); padding: 20px; margin: 0; border: 0; }

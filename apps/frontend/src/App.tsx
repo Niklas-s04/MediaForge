@@ -971,6 +971,7 @@ function App() {
   const [pickerOpen, setPickerOpen] = useState<string | null>(null)
   const [compressionWarning, setCompressionWarning] = useState<string | null>(null)
   const [pendingWarning, setPendingWarning] = useState<string | null>(null)
+  const [isCreatingJob, setIsCreatingJob] = useState(false)
   const [pendingDuplicateFiles, setPendingDuplicateFiles] = useState<BatchFile[]>([])
   const [pendingAction, setPendingAction] = useState<ActiveTab>('download')
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -1191,6 +1192,7 @@ function App() {
   }
 
   const createDownloadJob = async (force = false) => {
+    if (isCreatingJob) return
     if (!url.trim()) {
       setMessage('Bitte eine Download-URL eintragen.')
       return
@@ -1213,6 +1215,7 @@ function App() {
     appendAdvanced(input, downloadAdvanced)
     const body = { type: 'download', input }
 
+    setIsCreatingJob(true)
     try {
       setMessage(null)
       const params = new URLSearchParams({ lang: 'de' })
@@ -1251,10 +1254,13 @@ function App() {
     } catch (e) {
       setTransfer(null)
       setMessage('Download konnte nicht gestartet werden.')
+    } finally {
+      setIsCreatingJob(false)
     }
   }
 
   const createConvertJob = async (force = false) => {
+    if (isCreatingJob) return
     if (!convertFiles.length) {
       setMessage('Bitte mindestens eine Datei auswählen.')
       return
@@ -1273,6 +1279,7 @@ function App() {
     data.set('lang', 'de')
     appendAdvanced(data, convertAdvanced)
 
+    setIsCreatingJob(true)
     try {
       setMessage(null)
       const params = new URLSearchParams()
@@ -1369,6 +1376,8 @@ function App() {
     } catch (e) {
       setTransfer(null)
       setMessage('Batch-Konvertierung konnte nicht gestartet werden.')
+    } finally {
+      setIsCreatingJob(false)
     }
   }
 
@@ -1555,6 +1564,7 @@ function App() {
   }
 
   const confirmPendingWarning = () => {
+    setPendingWarning(null)
     if (pendingAction === 'download') createDownloadJob(true)
     else createConvertJob(true)
   }
@@ -1838,8 +1848,8 @@ function App() {
 
             <div className="panel-footer">
               {activeTab === 'download' && <span className="destination-note" title="Fertige Dateien können aus der Auftragsliste im Browser gespeichert werden."><StudioIcon name="folder" />Browser-Download</span>}
-              <button className="button primary" data-testid="create-job" type="button" onClick={() => (activeTab === 'download' ? createDownloadJob() : createConvertJob())}>
-                {activeTab === 'download' ? <><StudioIcon name="download" />Herunterladen</> : `${convertFiles.length || ''} Konvertierung${convertFiles.length === 1 ? '' : 'en'} starten`}
+              <button className="button primary" data-testid="create-job" type="button" disabled={isCreatingJob} aria-busy={isCreatingJob} onClick={() => (activeTab === 'download' ? createDownloadJob() : createConvertJob())}>
+                {isCreatingJob ? 'Wird gestartet…' : activeTab === 'download' ? <><StudioIcon name="download" />Herunterladen</> : `${convertFiles.length || ''} Konvertierung${convertFiles.length === 1 ? '' : 'en'} starten`}
               </button>
               {activeTab === 'convert' && batchId ? (
                 <button className="button secondary" type="button" disabled={!batchFinished || batchSuccessCount === 0} onClick={downloadBatch}>
