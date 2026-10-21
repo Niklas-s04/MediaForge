@@ -115,6 +115,9 @@ try:
 except Exception:
     pass
 
+# Vite copies public fonts outside /assets; keep their absolute CSS URLs usable.
+app.mount("/fonts", StaticFiles(directory=os.path.join(static_dir, "fonts"), check_dir=False), name="fonts")
+
 
 def get_log_dir() -> str:
     return os.environ.get("DATA_LOG_DIR") or os.environ.get("LOG_DIR") or "/data/logs"
