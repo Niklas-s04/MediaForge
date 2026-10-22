@@ -29,6 +29,7 @@ from .compression_goals import (
 )
 from .audit import audit_override
 from .diagnostics import install_diagnostics
+from .log_stream import read_log_chunk
 from .network_security import RemoteUrlPolicyError, validate_remote_url
 from .malware_scan import (
     MalwareDetectedError,
@@ -1217,11 +1218,9 @@ def download_batch_output(
         raise HTTPException(status_code=400, detail="Invalid batch ID")
 
     expire_old_job_outputs(session)
-    jobs = [
-        job
-        for job in session.exec(select(models.Job)).all()
-        if isinstance(job.input, dict) and job.input.get("batch_id") == batch_id
-    ]
+    jobs = session.exec(
+        select(models.Job).where(models.Job.input["batch_id"].as_string() == batch_id)
+    ).all()
     if not jobs:
         raise HTTPException(status_code=404, detail="Batch not found")
     if any(job.status in {"queued", "running"} for job in jobs):
@@ -1350,14 +1349,9 @@ def job_events(
 
             # read appended data from log file
             new_chunk = ""
+            more = False
             try:
-                if os.path.exists(log_path):
-                    with open(log_path, "rb") as f:
-                        f.seek(offset)
-                        data = f.read()
-                        if data:
-                            new_chunk = data.decode("utf-8", errors="replace")
-                            offset = f.tell()
+                new_chunk, offset, more = read_log_chunk(log_path, offset)
             except Exception:
                 new_chunk = ""
 
@@ -1373,11 +1367,12 @@ def job_events(
             yield f"id: {offset}\n"
             yield f"data: {json.dumps(payload)}\n\n"
 
-            if status in ("success", "failed", "cancelled", "expired", "deleted", "notfound"):
+            if not more and status in ("success", "failed", "cancelled", "expired", "deleted", "notfound"):
                 break
 
             # heartbeat / poll interval
-            time.sleep(1)
+            if not more:
+                time.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1585,6 +1580,7 @@ def run_events(
 
         # interpret Last-Event-ID as byte offset
         offset = get_resume_offset(request)
+        matching_continuation = False
 
         while True:
             try:
@@ -1601,23 +1597,19 @@ def run_events(
                 flow_id = None
 
             chunk = ""
+            more = False
             if flow_id:
                 flow_log_path = os.path.join(log_dir, f"flow-{flow_id}.log")
                 try:
-                    if os.path.exists(flow_log_path):
-                        with open(flow_log_path, "rb") as f:
-                            f.seek(offset)
-                            data = f.read()
-                            if data:
-                                text = data.decode("utf-8", errors="replace")
-
-                                # filter lines referencing this run
-                                needle = f"(run {run_id})"
-                                lines = [line for line in text.splitlines() if needle in line]
-                                if lines:
-                                    chunk = "\n".join(lines)
-
-                            offset = f.tell()
+                    text, offset, more = read_log_chunk(flow_log_path, offset)
+                    needle = f"(run {run_id})"
+                    parts = []
+                    for line in text.splitlines(keepends=True):
+                        matches = matching_continuation or needle in line
+                        if matches:
+                            parts.append(line)
+                        matching_continuation = matches and not line.endswith(("\n", "\r"))
+                    chunk = "".join(parts)
                 except Exception:
                     chunk = ""
 
@@ -1626,10 +1618,11 @@ def run_events(
             yield f"id: {offset}\n"
             yield f"data: {json.dumps(payload)}\n\n"
 
-            if status in ("completed", "failed", "cancelled", "notfound"):
+            if not more and status in ("completed", "failed", "cancelled", "notfound"):
                 break
 
-            time.sleep(1)
+            if not more:
+                time.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1646,6 +1639,7 @@ def flow_events(
         offset = get_resume_offset(request)
 
         flow_log_path = os.path.join(log_dir, f"flow-{flow_id}.log")
+        finished = False
 
         while True:
             try:
@@ -1656,14 +1650,9 @@ def flow_events(
                 status = "error"
 
             new_chunk = ""
+            more = False
             try:
-                if os.path.exists(flow_log_path):
-                    with open(flow_log_path, "rb") as fh:
-                        fh.seek(offset)
-                        data = fh.read()
-                        if data:
-                            new_chunk = data.decode("utf-8", errors="replace")
-                            offset = fh.tell()
+                new_chunk, offset, more = read_log_chunk(flow_log_path, offset)
             except Exception:
                 new_chunk = ""
 
@@ -1672,10 +1661,12 @@ def flow_events(
             yield f"id: {offset}\n"
             yield f"data: {json.dumps(payload)}\n\n"
 
-            if "completed" in new_chunk or "unexpected error" in new_chunk or status == "disabled":
+            finished = finished or "completed" in new_chunk or "unexpected error" in new_chunk or status == "disabled"
+            if finished and not more:
                 break
 
-            time.sleep(1)
+            if not more:
+                time.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -89,7 +89,7 @@ def test_remote_download_size_limit_removes_partial_file(monkeypatch, tmp_path):
                 {"status": "downloading", "downloaded_bytes": 5, "total_bytes": 5}
             )
 
-    monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", OversizedYoutubeDL, raising=False)
+    monkeypatch.setattr(sys.modules["yt_dlp"], "YoutubeDL", OversizedYoutubeDL, raising=False)
 
     with Session(engine) as session:
         job = worker.Job(type="download", status="running", input={})
@@ -161,7 +161,7 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
         Path(cmd[-1]).write_bytes(b"fake-mp3")
         return 0
 
-    monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", FakeYoutubeDL, raising=False)
+    monkeypatch.setattr(sys.modules["yt_dlp"], "YoutubeDL", FakeYoutubeDL, raising=False)
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
     monkeypatch.setattr(worker.glob, "glob", lambda pattern: [str(downloaded)])
@@ -243,7 +243,7 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
         Path(cmd[-1]).write_bytes(b"fake-webm")
         return 0
 
-    monkeypatch.setattr(worker.yt_dlp, "YoutubeDL", FakeYoutubeDL, raising=False)
+    monkeypatch.setattr(sys.modules["yt_dlp"], "YoutubeDL", FakeYoutubeDL, raising=False)
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
     monkeypatch.setattr(worker.glob, "glob", lambda pattern: [str(downloaded)])
@@ -438,9 +438,9 @@ def test_run_image_to_pdf_conversion_uses_img2pdf(monkeypatch, tmp_path):
     output_file = tmp_path / "out" / "photo.pdf"
     captured = {}
 
-    def fake_convert(path):
+    def fake_convert(path, *, outputstream):
         captured["path"] = path
-        return b"pdf"
+        outputstream.write(b"pdf")
 
     fake_img2pdf = types.SimpleNamespace(convert=fake_convert)
     monkeypatch.setitem(sys.modules, "img2pdf", fake_img2pdf)
@@ -462,9 +462,9 @@ def test_run_image_to_pdf_conversion_rasterizes_other_image_formats(monkeypatch,
         Path(cmd[-1]).write_bytes(b"png")
         return 0
 
-    def fake_convert(path):
+    def fake_convert(path, *, outputstream):
         captured["img2pdf_path"] = path
-        return b"pdf"
+        outputstream.write(b"pdf")
 
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
     monkeypatch.setitem(sys.modules, "img2pdf", types.SimpleNamespace(convert=fake_convert))
@@ -619,6 +619,39 @@ def test_ffmpeg_progress_parser_handles_supported_and_bad_lines():
     assert worker._parse_ffmpeg_progress_seconds("progress=end", current=9.0) == 9.0
 
 
+def test_ffmpeg_child_is_reaped_when_progress_is_interrupted(monkeypatch):
+    from celery.exceptions import SoftTimeLimitExceeded
+    processes = []
+    original_popen = worker.subprocess.Popen
+    def spawn(*args, **kwargs):
+        child = original_popen(*args, **kwargs)
+        processes.append(child)
+        return child
+    calls = 0
+    def progress(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SoftTimeLimitExceeded()
+    monkeypatch.setattr(worker.subprocess, "Popen", spawn)
+    monkeypatch.setattr(worker, "_probe_duration", lambda _: 10)
+    monkeypatch.setattr(worker, "_validate_media_command_encoders", lambda _: None)
+    monkeypatch.setattr(worker, "_set_job_progress", progress)
+    command = [sys.executable, "-c", "import time; print('out_time_us=1000000', flush=True); time.sleep(60)", "output"]
+    try:
+        with pytest.raises(SoftTimeLimitExceeded):
+            worker._run_ffmpeg_with_progress(command, session=None, job=None, input_path="input",
+                                            start_progress=0, end_progress=90, step="convert")
+        assert processes[0].poll() is not None
+        assert processes[0].stdout.closed
+    finally:
+        for child in processes:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            child.stdout.close()
+
+
 def test_process_convert_success(monkeypatch, tmp_path):
     engine = create_test_engine(tmp_path)
     log_dir = tmp_path / "logs"
@@ -762,159 +795,107 @@ def test_process_convert_failure_cleans_uploaded_source(monkeypatch, tmp_path):
         assert "ffmpeg failed" in saved.error_message
 
 
-def test_run_flow_creates_job_and_completes(monkeypatch, tmp_path):
+@pytest.fixture
+def flow_db(monkeypatch, tmp_path):
     engine = create_test_engine(tmp_path)
-    log_dir = tmp_path / "logs"
-    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
-    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
+    monkeypatch.setenv("DATA_LOG_DIR", str(tmp_path / "logs"))
+    yield engine
+    engine.dispose()
 
+
+def add_flow(engine, steps):
     with Session(engine) as session:
-        flow = worker.Flow(
-            name="smoke-flow",
-            description="test",
-            steps=[{"action": "download", "input": {"url": "https://example.invalid/file.mp3", "preset": "default"}}],
-        )
+        flow = worker.Flow(name="test", steps=steps)
         session.add(flow)
         session.commit()
         session.refresh(flow)
-        flow_id = flow.id
+        return flow.id
 
-    sent_tasks = []
 
-    def fake_send_task(task_name, args=None, kwargs=None):
-        sent_tasks.append((task_name, args, kwargs))
-        job_id = args[0]
-        with Session(engine) as session:
-            job = session.exec(select(worker.Job).where(worker.Job.id == job_id)).first()
-            assert job is not None
+def test_two_flows_complete_with_one_execution_slot(monkeypatch, flow_db):
+    queue = []
+    monkeypatch.setattr(worker.celery_app, "send_task", lambda *a, **k: pytest.fail("Flow must return its slot before the download executes"))
+    monkeypatch.setattr(worker.process_download_and_convert, "apply_async",
+                        lambda args, **options: queue.append((args[0], options)))
+    monkeypatch.setattr(worker.time, "sleep", lambda _: pytest.fail("Flow must not wait for a worker slot"))
+    steps = [{"action": "download", "timeout": 12, "input": {"url": "https://example.com/a"}}] * 2
+    ids = [add_flow(flow_db, steps), add_flow(flow_db, steps)]
+    for flow_id in ids:
+        assert worker.run_flow(flow_id)["status"] == "running"
+    assert len(queue) == 2
+    completed = []
+    while queue:
+        job_id, options = queue.pop(0)
+        assert options["soft_time_limit"] == 12
+        assert options["time_limit"] > 12
+        with Session(flow_db) as session:
+            job = session.get(worker.Job, job_id)
             job.status = "success"
-            job.output_path = f"/data/output/job-{job_id}.mp3"
-            job.finished_at = datetime.datetime.utcnow()
             session.add(job)
             session.commit()
-        return {"task_id": "fake-task"}
-
-    monkeypatch.setattr(worker.celery_app, "send_task", fake_send_task)
-    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
-
-    result = worker.run_flow(flow_id)
-
-    assert result == {"flow": flow_id, "run": 1, "status": "completed"}
-    assert sent_tasks == [("worker.process_download_and_convert", [1], None)]
-
-    with Session(engine) as session:
-        run = session.exec(select(worker.FlowRun).where(worker.FlowRun.flow_id == flow_id)).first()
-        assert run is not None
-        assert run.status == "completed"
-        assert run.job_ids == [1]
-
-        job = session.exec(select(worker.Job).where(worker.Job.id == 1)).first()
-        assert job is not None
-        assert job.status == "success"
-        assert job.created_at is not None
-
-    flow_log = (log_dir / f"flow-{flow_id}.log").read_text(encoding="utf-8")
-    assert "Starting flow" in flow_log
-    assert "Flow 1 completed" in flow_log
+        callback = options["link"]
+        assert callback.immutable
+        callback()
+        # Repeated delivery must not create another next-step job.
+        callback()
+        completed.append(job_id)
+    with Session(flow_db) as session:
+        runs = session.exec(select(worker.FlowRun)).all()
+        assert [run.status for run in runs] == ["completed", "completed"]
+        assert all(len(run.job_ids) == 2 for run in runs)
+        assert len(completed) == 4
 
 
-def test_run_flow_marks_failed_when_job_fails(monkeypatch, tmp_path):
-    engine = create_test_engine(tmp_path)
-    log_dir = tmp_path / "logs"
-    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
-    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
-
-    with Session(engine) as session:
-        flow = worker.Flow(
-            name="failing-flow",
-            steps=[{"action": "download", "input": {"url": "https://example.invalid/file.mp3"}}],
-        )
-        session.add(flow)
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_flow_observes_step_failure_and_cancellation(monkeypatch, flow_db, status):
+    queued = []
+    monkeypatch.setattr(worker.process_download_and_convert, "apply_async",
+                        lambda args, **options: queued.append((args[0], options)))
+    flow_id = add_flow(flow_db, [{"action": "download", "input": {}}])
+    worker.run_flow(flow_id)
+    job_id, options = queued.pop()
+    with Session(flow_db) as session:
+        job = session.get(worker.Job, job_id)
+        job.status = status
+        session.add(job)
         session.commit()
-        session.refresh(flow)
-        flow_id = flow.id
-
-    def fake_send_task(task_name, args=None, kwargs=None):
-        job_id = args[0]
-        with Session(engine) as session:
-            job = session.exec(select(worker.Job).where(worker.Job.id == job_id)).first()
-            assert job is not None
-            job.status = "failed"
-            job.error_message = "download_failed"
-            job.finished_at = datetime.datetime.utcnow()
-            session.add(job)
-            session.commit()
-        return {"task_id": "fake-task"}
-
-    monkeypatch.setattr(worker.celery_app, "send_task", fake_send_task)
-    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
-
-    result = worker.run_flow(flow_id)
-
-    assert result == {"flow": flow_id, "run": 1, "status": "failed"}
-    with Session(engine) as session:
-        run = session.exec(select(worker.FlowRun).where(worker.FlowRun.flow_id == flow_id)).first()
-        assert run is not None
-        assert run.status == "failed"
+    assert options["link"]()["status"] == "failed"
+    with Session(flow_db) as session:
+        assert session.get(worker.Job, job_id).status == status
 
 
-def test_run_flow_marks_failed_on_timeout(monkeypatch, tmp_path):
-    engine = create_test_engine(tmp_path)
-    log_dir = tmp_path / "logs"
-    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
-    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
+@pytest.mark.parametrize("step,error", [
+    ({"action": "download", "timeout": 0}, "flow_step_timeout"),
+    ({"action": "download", "timeout": "bad"}, "flow_step_timeout"),
+    ({"action": "download", "timeout": "NaN"}, "flow_step_timeout"),
+    ({"action": "mystery"}, "unknown_action:mystery"),
+])
+def test_flow_rejects_invalid_step(flow_db, step, error):
+    flow_id = add_flow(flow_db, [step])
+    assert worker.run_flow(flow_id)["status"] == "failed"
+    with Session(flow_db) as session:
+        job = session.exec(select(worker.Job)).one()
+        assert job.status == "failed"
+        assert job.error_message == error
 
-    with Session(engine) as session:
-        flow = worker.Flow(
-            name="timeout-flow",
-            steps=[{"action": "download", "timeout": 0, "input": {"url": "https://example.invalid/file.mp3"}}],
-        )
-        session.add(flow)
-        session.commit()
-        session.refresh(flow)
-        flow_id = flow.id
 
-    monkeypatch.setattr(worker.celery_app, "send_task", lambda *args, **kwargs: {"task_id": "fake-task"})
-    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
-
-    result = worker.run_flow(flow_id)
-
-    assert result == {"flow": flow_id, "run": 1, "status": "failed"}
-    with Session(engine) as session:
-        run = session.exec(select(worker.FlowRun).where(worker.FlowRun.flow_id == flow_id)).first()
-        job = session.exec(select(worker.Job).where(worker.Job.id == 1)).first()
-        assert run is not None
-        assert run.status == "failed"
-        assert job is not None
+def test_hard_timeout_errback_works_without_result_backend(monkeypatch, flow_db):
+    from celery.exceptions import TimeLimitExceeded
+    from celery.app.task import Context
+    queued = []
+    monkeypatch.setattr(worker.process_download_and_convert, "apply_async",
+                        lambda args, **options: queued.append((args[0], options)))
+    monkeypatch.setattr(worker.run_flow, "apply_async", lambda args, **kw: worker.run_flow(*args))
+    flow_id = add_flow(flow_db, [{"action": "download", "timeout": 1}])
+    worker.run_flow(flow_id)
+    job_id, options = queued.pop()
+    request = Context(id="timed-out", errbacks=[options["link_error"]], chain=None)
+    worker.celery_app.backend.mark_as_failure("timed-out", TimeLimitExceeded(1), request=request, store_result=False)
+    with Session(flow_db) as session:
+        job = session.get(worker.Job, job_id)
         assert job.status == "failed"
         assert job.error_message == "flow_step_timeout"
-
-
-def test_run_flow_marks_failed_on_unknown_action(monkeypatch, tmp_path):
-    engine = create_test_engine(tmp_path)
-    log_dir = tmp_path / "logs"
-    monkeypatch.setenv("DATA_LOG_DIR", str(log_dir))
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'worker.db'}")
-    monkeypatch.setattr(worker, "_get_engine", lambda: engine)
-
-    with Session(engine) as session:
-        flow = worker.Flow(name="bad-flow", steps=[{"action": "mystery", "input": {}}])
-        session.add(flow)
-        session.commit()
-        session.refresh(flow)
-        flow_id = flow.id
-
-    result = worker.run_flow(flow_id)
-
-    assert result == {"flow": flow_id, "run": 1, "status": "failed"}
-    with Session(engine) as session:
-        run = session.exec(select(worker.FlowRun).where(worker.FlowRun.flow_id == flow_id)).first()
-        job = session.exec(select(worker.Job).where(worker.Job.id == 1)).first()
-        assert run is not None
-        assert run.status == "failed"
-        assert job is not None
-        assert job.status == "failed"
-        assert job.error_message == "unknown_action:mystery"
+        assert session.exec(select(worker.FlowRun)).one().status == "failed"
+    assert worker.celery_app.conf.result_backend is None
+    assert worker.celery_app.conf.task_ignore_result is True

@@ -31,6 +31,11 @@ data/
 
 # Scratch / local previews
 tmp_*
+tmp/
+docs/
+.gstack/
+.impeccable/
+truenas-admin/
 index_preview.html
 
 # Editor / OS

@@ -155,7 +155,7 @@ Important environment variables:
 API_PORT=8787
 API_BIND_ADDRESS=127.0.0.1
 TZ=Europe/Berlin
-WORKER_CONCURRENCY=2
+WORKER_CONCURRENCY=1
 DATABASE_URL=sqlite:////data/db.sqlite3
 REDIS_URL=redis://redis:6379/0
 DATA_LOG_DIR=/data/logs
@@ -167,7 +167,10 @@ OUTPUT_RETENTION_HOURS=24
 OUTPUT_CLEANUP_INTERVAL_SECONDS=3600
 DOCUMENT_CONVERT_TIMEOUT_SECONDS=120
 MALWARE_SCAN_ENABLED=true
-CLAMAV_TIMEOUT_SECONDS=330
+CLAMAV_TIMEOUT_SECONDS=900
+CLAMAV_IDLE_SECONDS=60
+CLAMAV_STARTUP_SECONDS=180
+CLAMAV_DATABASE_MAX_AGE_SECONDS=604800
 CLAMAV_RETRIES=2
 MALWARE_SCAN_MAX_BYTES=2147483648
 CLAMAV_MEMORY_LIMIT=3g
@@ -180,7 +183,56 @@ CLAMAV_CPUS=2.0
 
 `DOCUMENT_CONVERT_TIMEOUT_SECONDS` controls the LibreOffice/Poppler conversion timeout for uploaded document jobs.
 
-Runtime files are stored in the root `data/` directory locally and mounted as `/data` inside the containers. The database, logs, uploads, temporary processing files, generated output and archives belong there and are ignored by Git.
+The database, logs, uploads, generated output and archives are stored in the root
+`data/` directory and mounted as `/data`. Large temporary files use separate
+disk-backed Docker volumes (`api-scratch`, `worker-scratch`, `scanner-scratch`)
+mounted at `/scratch`. Each service owns its volume; never share these volumes
+between replicas. The application entrypoint removes only its private scratch
+contents on restart; ClamAV removes its scan scratch after the engine stops.
+User uploads and outputs are not part of this scratch cleanup.
+
+Place Docker storage on the intended SSD pool and set a suitable storage quota
+through TrueNAS. These volumes are not automatically size-limited or guaranteed
+to live on an SSD; they use the host's Docker storage location and mount options.
+The remaining `/tmp` tmpfs defaults to 64 MiB for small runtime files. Existing
+`.env` overrides remain effective: update old 4 GiB tmpfs and concurrency values
+when adopting the new defaults.
+
+## Low idle resource usage
+
+The scanner gateway keeps TCP port 3310 available while the ClamAV engine is
+stopped. Only a scan starts `clamd` on loopback port 3311; scans are serialized,
+connections and buffering are bounded, and the engine stops after
+`CLAMAV_IDLE_SECONDS` without scans. Health checks do not wake it. A health
+response means the gateway/updater and recent database files are available;
+the actual engine validates and scans on demand. Missing, stale or invalid
+signatures and scanner failures never release unscanned files.
+
+Freshclam continues updating signatures and validates downloads. Updates and
+active scans can still require substantial memory: keep the 3 GiB scanner limit
+until measured on your workload. `ConcurrentDatabaseReload no` avoids two
+simultaneous clamd engines during reload. A first scan after idle waits for the
+database to load; `CLAMAV_TIMEOUT_SECONDS` covers this and queued scanning.
+The gateway rejects databases with a daily-file modification time older than
+seven days by default (`CLAMAV_DATABASE_MAX_AGE_SECONDS`).
+
+One prefork worker child is the default. Flows schedule a step, release the
+worker slot, and advance through callbacks; no worker waits for another worker
+in the same queue. A step's timeout now measures its execution time, excluding
+time waiting in the queue. The soft limit allows cleanup; a hard limit follows
+10 seconds later. SQLite stores job/flow state; unused Celery result storage is
+disabled, while Redis remains the broker. Finish active jobs and flows before
+upgrading or rolling back so callbacks are not mixed between code versions.
+
+The UI polls every 5 seconds while jobs are active, every 30 seconds when idle,
+and pauses job polling in hidden tabs. Returning to a visible tab refreshes it.
+SSE log reads are bounded to 64 KiB; large completed logs drain in multiple events.
+PDF creation streams to disk instead of constructing a complete PDF byte string.
+
+Measure cold idle, warm idle, scans, database updates and post-job idle separately.
+The original measurements were approximately 967 MiB in the scanner container
+and 190 MiB in the other three groups. They motivate this design, but are not a
+before/after benchmark or a guarantee of the new consumption on your NAS.
 
 ## Malware protection and containment
 
@@ -207,8 +259,10 @@ firewall; avoid `0.0.0.0`.
 
 Antivirus signatures cannot guarantee that a file is harmless. MediaForge also
 runs API and worker processes as UID/GID `10001`, removes Linux capabilities,
-uses a read-only container root filesystem and gives temporary directories
-`noexec`, `nosuid` and `nodev` mount options. Keep the stack and its base images
+uses a read-only container root filesystem and gives the small tmpfs mounts
+`noexec`, `nosuid` and `nodev` options. Disk scratch volumes inherit the host
+filesystem's restrictions; configure equivalent restrictions on their storage
+where supported. Keep the stack and its base images
 updated because media parsers remain an important attack surface.
 
 The URL check is a defense-in-depth SSRF control, not a substitute for egress
@@ -359,7 +413,6 @@ apps/worker    Celery worker and worker tests
 apps/frontend  React/Vite frontend, public assets and E2E tests
 docker          Docker Compose stack
 docs            Notes and risk documentation
-scripts         Local recovery/helper scripts
 ```
 
 ## License
