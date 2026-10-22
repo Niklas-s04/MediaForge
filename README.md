@@ -191,6 +191,12 @@ between replicas. The application entrypoint removes only its private scratch
 contents on restart; ClamAV removes its scan scratch after the engine stops.
 User uploads and outputs are not part of this scratch cleanup.
 
+For older TrueNAS definitions without a writable `/scratch` volume, API and
+worker startup falls back to `/tmp/mediaforge-scratch` and logs a warning.
+The API initializes only its temporary directory, not the worker's jobs directory.
+This compatibility fallback uses the existing `/tmp` capacity (and RAM if it is
+tmpfs); mount the private disk volumes above for large uploads and conversions.
+
 Place Docker storage on the intended SSD pool and set a suitable storage quota
 through TrueNAS. These volumes are not automatically size-limited or guaranteed
 to live on an SSD; they use the host's Docker storage location and mount options.

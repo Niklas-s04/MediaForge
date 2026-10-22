@@ -61,6 +61,13 @@ jobs:
         run: |
           docker run --rm --entrypoint python mediaforge-api:local -c "import apps.api.app.main"
           docker run --rm --entrypoint python mediaforge-worker:local -c "import apps.worker.worker"
+      - name: Smoke-test read-only startup without scratch volumes
+        run: |
+          for image in mediaforge-api:local mediaforge-worker:local; do
+            docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
+              "$image" python -c "import os,tempfile; f=tempfile.TemporaryFile(); f.write(b'ok'); f.close(); p=os.environ.get('DATA_TMP_DIR'); assert p is None or os.access(p,os.W_OK)"
+          done
       - name: Smoke-test real ClamAV gateway without network downloads
         run: |
           docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
