@@ -1037,13 +1037,38 @@ function App() {
       })
   }, [])
 
+  const hasActiveJobs = jobs.some(job => ['queued', 'running'].includes(job.status.toLowerCase()))
   useEffect(() => {
-    const interval = window.setInterval(loadJobs, 5000)
-    return () => window.clearInterval(interval)
-  }, [loadJobs])
+    let stopped = false
+    let timer: number | undefined
+    const schedule = () => {
+      window.clearTimeout(timer)
+      if (!stopped && document.visibilityState === 'visible') {
+        timer = window.setTimeout(poll, hasActiveJobs ? 5000 : 30000)
+      }
+    }
+    const poll = async () => {
+      if (stopped || document.visibilityState !== 'visible') return
+      await loadJobs()
+      schedule()
+    }
+    const onVisibility = () => {
+      window.clearTimeout(timer)
+      if (document.visibilityState === 'visible') void poll()
+    }
+    schedule()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stopped = true
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [loadJobs, hasActiveJobs])
 
   useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') setNow(Date.now())
+    }, 1000)
     return () => window.clearInterval(interval)
   }, [])
 

@@ -1,13 +1,14 @@
 from apps.worker.compress import compress_file
 from celery import Celery
+from celery.exceptions import SoftTimeLimitExceeded, TimeLimitExceeded
 import os
 import time
 import shutil
 import datetime
 import logging
+import math
 from sqlmodel import Session, create_engine, select
 from typing import Optional
-import yt_dlp
 import subprocess
 import glob
 import json
@@ -26,7 +27,8 @@ from apps.api.app.models import Flow, FlowRun, Job
 
 redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 
-celery_app = Celery("worker", broker=redis_url, backend=redis_url)
+celery_app = Celery("worker", broker=redis_url)
+celery_app.conf.task_ignore_result = True
 
 
 DEFAULT_FORMATS = {
@@ -498,23 +500,29 @@ def _run_ffmpeg_with_progress(
     last_update = 0.0
     out_time = 0.0
     assert process.stdout is not None
-    for raw_line in process.stdout:
-        line = raw_line.strip()
-        if not line:
-            continue
-        out_time = _parse_ffmpeg_progress_seconds(line, out_time)
+    try:
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            out_time = _parse_ffmpeg_progress_seconds(line, out_time)
 
-        now = time.time()
-        if now - last_update < 0.5 and "progress=end" not in line:
-            continue
-        last_update = now
-        ratio = max(0.0, min(1.0, out_time / duration))
-        progress = start_progress + round((end_progress - start_progress) * ratio)
-        elapsed = max(0.001, now - started)
-        eta = (elapsed / ratio) - elapsed if ratio > 0 else None
-        _set_job_progress(session, job, progress, f"{step} - {progress}% - ca. {_format_eta(eta)} verbleibend")
+            now = time.time()
+            if now - last_update < 0.5 and "progress=end" not in line:
+                continue
+            last_update = now
+            ratio = max(0.0, min(1.0, out_time / duration))
+            progress = start_progress + round((end_progress - start_progress) * ratio)
+            elapsed = max(0.001, now - started)
+            eta = (elapsed / ratio) - elapsed if ratio > 0 else None
+            _set_job_progress(session, job, progress, f"{step} - {progress}% - ca. {_format_eta(eta)} verbleibend")
 
-    return_code = process.wait()
+        return_code = process.wait()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, progress_cmd)
     _set_job_progress(session, job, end_progress, step, force=True)
@@ -578,6 +586,8 @@ def _download_with_ytdlp(
         "progress_hooks": [progress_hook],
     }
     try:
+        import yt_dlp
+
         with yt_dlp.YoutubeDL(options) as ydl:
             ydl.download([input_url])
     except Exception as exc:
@@ -688,7 +698,7 @@ def _run_image_to_pdf_conversion(input_path: str, output_path: str):
 
     try:
         with open(output_path, "wb") as target:
-            target.write(img2pdf.convert(pdf_input))
+            img2pdf.convert(pdf_input, outputstream=target)
     finally:
         if temp_dir:
             temp_dir.cleanup()
@@ -1089,6 +1099,8 @@ def process_download_and_convert(self, job_id: int):
                     session.commit()
                     shutil.rmtree(tmpdir, ignore_errors=True)
                     return
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as e:
                     _log(job_id, f"Download exception (attempt {attempt}): {e}")
 
@@ -1140,7 +1152,7 @@ def process_download_and_convert(self, job_id: int):
                 _remove_rejected_file(outpath)
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 job.status = 'failed'
-                job.error_message = str(e)
+                job.error_message = "flow_step_timeout" if isinstance(e, SoftTimeLimitExceeded) else str(e)
                 session.add(job)
                 session.commit()
                 return
@@ -1174,17 +1186,21 @@ def process_download_and_convert(self, job_id: int):
         _cleanup_job_output_partials(os.environ.get("DATA_OUTPUT_DIR", "/data/output"), job_id)
         # best-effort DB update
         try:
-            engine2 = _get_engine()
-            with Session(engine2) as session2:
+            with Session(engine) as session2:
                 stmt2 = select(Job).where(Job.id == job_id)
                 job2 = session2.exec(stmt2).first()
                 if job2:
                     job2.status = 'failed'
-                    job2.error_message = str(e)
+                    job2.error_message = "flow_step_timeout" if isinstance(e, SoftTimeLimitExceeded) else str(e)
+                    job2.finished_at = datetime.datetime.utcnow()
                     session2.add(job2)
                     session2.commit()
         except Exception:
             pass
+
+    finally:
+        _PROGRESS_WRITE_STATE.pop(job_id, None)
+        engine.dispose()
 
 
 @celery_app.task(bind=True, name="worker.process_convert")
@@ -1274,7 +1290,7 @@ def process_convert(self, job_id: int):
             except Exception as e:
                 _log(job_id, f"Media family resolution failed: {e}")
                 job.status = "failed"
-                job.error_message = str(e)
+                job.error_message = "flow_step_timeout" if isinstance(e, SoftTimeLimitExceeded) else str(e)
                 job.finished_at = datetime.datetime.utcnow()
                 session.add(job)
                 session.commit()
@@ -1352,7 +1368,7 @@ def process_convert(self, job_id: int):
                 _log(job_id, f"Conversion failed: {e}")
                 _remove_rejected_file(outpath)
                 job.status = "failed"
-                job.error_message = str(e)
+                job.error_message = "flow_step_timeout" if isinstance(e, SoftTimeLimitExceeded) else str(e)
                 job.finished_at = datetime.datetime.utcnow()
                 session.add(job)
                 session.commit()
@@ -1383,7 +1399,7 @@ def process_convert(self, job_id: int):
                 job2 = session2.exec(stmt2).first()
                 if job2:
                     job2.status = "failed"
-                    job2.error_message = str(e)
+                    job2.error_message = "flow_step_timeout" if isinstance(e, SoftTimeLimitExceeded) else str(e)
                     job2.finished_at = datetime.datetime.utcnow()
                     session2.add(job2)
                     session2.commit()
@@ -1391,119 +1407,121 @@ def process_convert(self, job_id: int):
             pass
     finally:
         _remove_upload_source(upload_source_to_cleanup)
+        _PROGRESS_WRITE_STATE.pop(job_id, None)
+        engine.dispose()
 
 
-@celery_app.task(bind=True, name="worker.run_flow")
-def run_flow(self, flow_id: int, run_id: Optional[int] = None):
+@celery_app.task(name="worker.flow_step_failed")
+def flow_step_failed(request, exc, traceback, flow_id: int, run_id: int, job_id: int):
+    """Celery invokes this errback even without a result backend (including hard timeouts)."""
     engine = _get_engine()
     try:
         with Session(engine) as session:
-            # load flow
-            stmt = select(Flow).where(Flow.id == flow_id)
-            flow = session.exec(stmt).first()
+            job = session.get(Job, job_id)
+            if job and job.status not in {"success", "failed", "cancelled"}:
+                job.status = "failed"
+                job.error_message = (
+                    "flow_step_timeout" if isinstance(exc, (TimeLimitExceeded, SoftTimeLimitExceeded))
+                    else "flow_step_interrupted"
+                )
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+    finally:
+        engine.dispose()
+    run_flow.apply_async(args=[flow_id, run_id, job_id])
+
+
+@celery_app.task(bind=True, name="worker.run_flow")
+def run_flow(self, flow_id: int, run_id: Optional[int] = None, completed_job_id: Optional[int] = None):
+    """Schedule one step and release the worker slot; its callback advances the run.
+
+    SQLite holds all state. No task waits for another task, so one prefork child
+    can process any number of interleaved flows without a result backend.
+    """
+    engine = _get_engine()
+    try:
+        with Session(engine) as session:
+            flow = session.get(Flow, flow_id)
             if not flow:
                 _log_flow(flow_id, "Flow not found in DB")
                 return
-
-            # ensure we have a FlowRun record
-            run = None
-            if run_id:
-                stmtr = select(FlowRun).where(FlowRun.id == run_id)
-                run = session.exec(stmtr).first()
+            run = session.get(FlowRun, run_id) if run_id else None
+            if run and run.flow_id != flow_id:
+                raise ValueError("flow_run_mismatch")
             if not run:
-                run = FlowRun(flow_id=flow_id, status='running', job_ids=[], started_at=datetime.datetime.utcnow())
+                if completed_job_id is not None:
+                    return
+                run = FlowRun(flow_id=flow_id, status="running", job_ids=[])
                 session.add(run)
                 session.commit()
                 session.refresh(run)
-
+                run_id = run.id
+                _log_flow(flow_id, f"Starting flow {flow_id} (run {run.id})")
+            result = {"flow": flow_id, "run": run.id, "status": run.status}
+            if run.status != "running":
+                return result
+            job_ids = run.job_ids or []
+            # Ignore duplicated callbacks and repeated start messages. Only the
+            # latest step's completion can advance a run.
+            if job_ids and completed_job_id != job_ids[-1]:
+                return result
+            jobs = [session.get(Job, job_id) for job_id in job_ids]
+            if jobs and (jobs[-1] is None or jobs[-1].status not in {"success", "failed", "cancelled"}):
+                return result
             steps = flow.steps or []
-            _log_flow(flow_id, f"Starting flow {flow_id} with {len(steps)} steps (run {run.id})")
-            run_failed = False
-
-            for idx, step in enumerate(steps):
-                action = step.get('action')
-                input_obj = step.get('input', {})
-
-                # create a job for this step (ensure created_at set)
-                job = Job(type=action, input=input_obj, status='queued', created_at=datetime.datetime.utcnow())
+            for step in steps[len(job_ids):]:
+                action = step.get("action")
+                job = Job(type=action or "unknown", input=step.get("input", {}), status="queued")
                 session.add(job)
                 session.commit()
                 session.refresh(job)
-                _log_flow(flow_id, f"Flow step {idx}: created job {job.id} action={action}")
-
-                # attach job id to run
                 run.job_ids = (run.job_ids or []) + [job.id]
                 session.add(run)
                 session.commit()
-
-                if action == 'download':
-                    # dispatch download task and wait for completion by polling job row
-                    celery_app.send_task('worker.process_download_and_convert', args=[job.id])
-                    waited = 0
-                    timeout = int(step.get('timeout', 3600))
-                    # Use a fresh short-lived Session for each poll so we observe
-                    # updates made by the worker process (avoid identity-map caching).
-                    while waited < timeout:
-                        try:
-                            with Session(engine) as poll_sess:
-                                stmtj = select(Job).where(Job.id == job.id)
-                                cur = poll_sess.exec(stmtj).first()
-                                if cur and cur.status in ('success', 'failed', 'cancelled'):
-                                    _log_flow(flow_id, f"Job {job.id} finished with status {cur.status}")
-                                    if cur.status != 'success':
-                                        run_failed = True
-                                    break
-                        except Exception as e:
-                            _log_flow(flow_id, f"Error polling job {job.id}: {e}")
-                        time.sleep(1)
-                        waited += 1
-                    else:
-                        _log_flow(flow_id, f"Job {job.id} timed out after {timeout}s")
-                        run_failed = True
-                        try:
-                            with Session(engine) as timeout_sess:
-                                stmtj = select(Job).where(Job.id == job.id)
-                                timed_out_job = timeout_sess.exec(stmtj).first()
-                                if timed_out_job:
-                                    timed_out_job.status = 'failed'
-                                    timed_out_job.error_message = 'flow_step_timeout'
-                                    timed_out_job.finished_at = datetime.datetime.utcnow()
-                                    timeout_sess.add(timed_out_job)
-                                    timeout_sess.commit()
-                        except Exception as e:
-                            _log_flow(flow_id, f"Error marking job {job.id} timed out: {e}")
-
-                else:
-                    run_failed = True
-                    job.status = 'failed'
-                    job.error_message = f"unknown_action:{action}"
-                    job.finished_at = datetime.datetime.utcnow()
-                    session.add(job)
-                    session.commit()
-                    _log_flow(flow_id, f"Unknown action '{action}' - failing run")
-
-            # finalize run
-            run.status = 'failed' if run_failed else 'completed'
+                jobs.append(job)
+                _log_flow(flow_id, f"Created job {job.id} action={action}")
+                try:
+                    timeout = float(step.get("timeout", 3600))
+                except (TypeError, ValueError):
+                    timeout = 0
+                if not math.isfinite(timeout):
+                    timeout = 0
+                if action == "download" and timeout > 0:
+                    try:
+                        process_download_and_convert.apply_async(
+                            args=[job.id], soft_time_limit=timeout, time_limit=timeout + 10,
+                            link=run_flow.si(flow_id, run.id, job.id),
+                            link_error=flow_step_failed.s(flow_id, run.id, job.id),
+                        )
+                    except Exception:
+                        job.status = "failed"
+                        job.error_message = "flow_step_dispatch_failed"
+                        job.finished_at = datetime.datetime.utcnow()
+                        session.add(job)
+                        session.commit()
+                        raise
+                    return result
+                job.status = "failed"
+                job.error_message = "flow_step_timeout" if action == "download" else f"unknown_action:{action}"
+                job.finished_at = datetime.datetime.utcnow()
+                session.add(job)
+                session.commit()
+            run.status = "completed" if all(job and job.status == "success" for job in jobs) else "failed"
             run.finished_at = datetime.datetime.utcnow()
             session.add(run)
             session.commit()
-
             _log_flow(flow_id, f"Flow {flow_id} {run.status} (run {run.id})")
-            return {'flow': flow_id, 'run': run.id, 'status': run.status}
-
-    except Exception as e:
-        logging.exception('Flow runner error')
-        _log_flow(flow_id, f"Flow runner unexpected error: {e}")
-        try:
-            with Session(engine) as session:
-                target_run = None
-                if run_id:
-                    target_run = session.exec(select(FlowRun).where(FlowRun.id == run_id)).first()
-                if target_run:
-                    target_run.status = 'failed'
-                    target_run.finished_at = datetime.datetime.utcnow()
-                    session.add(target_run)
-                    session.commit()
-        except Exception:
-            logging.exception('Failed to mark flow run failed')
-        return
+            return {"flow": flow_id, "run": run.id, "status": run.status}
+    except Exception as exc:
+        logging.exception("Flow runner error")
+        _log_flow(flow_id, f"Flow runner unexpected error: {exc}")
+        with Session(engine) as session:
+            run = session.get(FlowRun, run_id) if run_id else None
+            if run:
+                run.status = "failed"
+                run.finished_at = datetime.datetime.utcnow()
+                session.add(run)
+                session.commit()
+    finally:
+        engine.dispose()

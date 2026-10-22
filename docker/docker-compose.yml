@@ -22,14 +22,16 @@ services:
       - MALWARE_SCAN_ENABLED=${MALWARE_SCAN_ENABLED:-true}
       - CLAMAV_HOST=clamav
       - CLAMAV_PORT=3310
-      - CLAMAV_TIMEOUT_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-330}
+      - CLAMAV_TIMEOUT_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-900}
+      - CLAMAV_HEALTH_TIMEOUT_SECONDS=3
       - CLAMAV_RETRIES=${CLAMAV_RETRIES:-2}
       - MALWARE_SCAN_MAX_BYTES=${MALWARE_SCAN_MAX_BYTES:-2147483648}
     volumes:
       - ../data:/data
+      - api-scratch:/scratch
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=${API_TMPFS_SIZE:-4g},mode=1777
+      - /tmp:rw,noexec,nosuid,nodev,size=${API_TMPFS_SIZE:-64m},mode=1777
     cap_drop:
       - ALL
     security_opt:
@@ -66,15 +68,16 @@ services:
       - MALWARE_SCAN_ENABLED=${MALWARE_SCAN_ENABLED:-true}
       - CLAMAV_HOST=clamav
       - CLAMAV_PORT=3310
-      - CLAMAV_TIMEOUT_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-330}
+      - CLAMAV_TIMEOUT_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-900}
       - CLAMAV_RETRIES=${CLAMAV_RETRIES:-2}
       - MALWARE_SCAN_MAX_BYTES=${MALWARE_SCAN_MAX_BYTES:-2147483648}
-    command: ["celery", "-A", "apps.worker.worker:celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-2}"]
+    command: ["celery", "-A", "apps.worker.worker:celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-1}", "--prefetch-multiplier=1", "--without-gossip", "--without-mingle"]
     volumes:
       - ../data:/data
+      - worker-scratch:/scratch
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-4g},mode=1777
+      - /tmp:rw,noexec,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-64m},mode=1777
     cap_drop:
       - ALL
     security_opt:
@@ -99,14 +102,22 @@ services:
     container_name: nas_convert_clamav
     restart: unless-stopped
     user: "clamav"
-    entrypoint: ["/init-unprivileged"]
+    environment:
+      - CLAMAV_IDLE_SECONDS=${CLAMAV_IDLE_SECONDS:-60}
+      - CLAMAV_STARTUP_SECONDS=${CLAMAV_STARTUP_SECONDS:-180}
+      - CLAMAV_REQUEST_SECONDS=${CLAMAV_TIMEOUT_SECONDS:-900}
+      - CLAMAV_MAX_BYTES=${MALWARE_SCAN_MAX_BYTES:-2147483648}
+      - CLAMAV_DATABASE_MAX_AGE_SECONDS=${CLAMAV_DATABASE_MAX_AGE_SECONDS:-604800}
+    init: true
+    stop_grace_period: 45s
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
       - /var/log/clamav:rw,noexec,nosuid,nodev,size=64m,mode=1777
       - /run/clamav:rw,noexec,nosuid,nodev,size=16m,mode=1777
     volumes:
       - clamav-db:/var/lib/clamav
+      - scanner-scratch:/scratch
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -137,7 +148,7 @@ services:
     pids_limit: 128
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 30s
       timeout: 3s
       retries: 12
       start_period: 5s
@@ -147,6 +158,9 @@ services:
 volumes:
   redis-data:
   clamav-db:
+  api-scratch:
+  worker-scratch:
+  scanner-scratch:
 
 networks:
   backend:

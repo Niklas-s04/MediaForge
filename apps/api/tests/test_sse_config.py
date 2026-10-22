@@ -6,8 +6,85 @@ from apps.api.app.main import get_log_dir, get_resume_offset
 from apps.api.app.models import Flow, FlowRun, Job
 
 
+def test_completed_job_drains_large_utf8_log_in_bounded_events(monkeypatch, tmp_path):
+    import asyncio
+    import json
+
+    engine = create_test_engine(tmp_path)
+    patch_session(monkeypatch, engine)
+    monkeypatch.setenv("DATA_LOG_DIR", str(tmp_path))
+    with Session(engine) as session:
+        job = Job(type="convert", status="success", input={})
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+    content = ("ä" * 40000 + "\n") * 3
+    (tmp_path / f"job-{job_id}.log").write_bytes(content.encode("utf-8"))
+    response = main.job_events(job_id, make_request([]))
+    text = asyncio.run(collect_stream_text(response))
+    events = [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
+    assert len(events) > 1
+    assert all(len(event["chunk"].encode("utf-8")) <= 65536 for event in events)
+    assert "".join(event["chunk"] for event in events) == content
+    assert f"id: {len(content.encode('utf-8'))}" in text
+
+
+def test_completed_run_drains_all_matching_log_lines(monkeypatch, tmp_path):
+    import asyncio
+    import json
+
+    engine = create_test_engine(tmp_path)
+    patch_session(monkeypatch, engine)
+    monkeypatch.setenv("DATA_LOG_DIR", str(tmp_path))
+    with Session(engine) as session:
+        flow = Flow(name="large-log", steps=[])
+        session.add(flow)
+        session.commit()
+        session.refresh(flow)
+        run = FlowRun(flow_id=flow.id, status="completed", job_ids=[])
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        flow_id, run_id = flow.id, run.id
+    lines = [f"(run {run_id}) line {i} " + "x" * 500 for i in range(400)]
+    (tmp_path / f"flow-{flow_id}.log").write_text("\n".join(lines), encoding="utf-8")
+    response = main.run_events(run_id, make_request([]))
+    text = asyncio.run(collect_stream_text(response))
+    events = [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
+    assert len(events) > 1
+    assert [line for event in events for line in event["run_log"].splitlines()] == lines
+
+
 def make_request(headers: list[tuple[bytes, bytes]]) -> Request:
     return Request({"type": "http", "method": "GET", "path": "/", "headers": headers})
+
+
+def test_run_events_preserves_long_line_continuations(monkeypatch, tmp_path):
+    import asyncio
+    import json
+
+    engine = create_test_engine(tmp_path)
+    patch_session(monkeypatch, engine)
+    monkeypatch.setenv("DATA_LOG_DIR", str(tmp_path))
+    with Session(engine) as session:
+        flow = Flow(name="long-line", steps=[])
+        session.add(flow)
+        session.commit()
+        session.refresh(flow)
+        run = FlowRun(flow_id=flow.id, status="completed", job_ids=[])
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        flow_id, run_id = flow.id, run.id
+    expected = f"(run {run_id}) " + "ä" * 70000 + "\n"
+    content = expected + "(run 999999) unrelated\n"
+    (tmp_path / f"flow-{flow_id}.log").write_bytes(content.encode("utf-8"))
+    response = main.run_events(run_id, make_request([]))
+    text = asyncio.run(collect_stream_text(response))
+    events = [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
+    assert "".join(event["run_log"] for event in events) == expected
+    assert all(len(event["run_log"].encode("utf-8")) <= 65536 for event in events)
 
 
 def create_test_engine(tmp_path):
