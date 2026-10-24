@@ -673,7 +673,8 @@ def _run_document_conversion(input_path: str, output_path: str, family: str, out
         shutil.copyfile(input_path, output_path)
         return
 
-    if family == "pdf" and output_format == "txt":
+    # family is the requested output family (usually "text" here), not the input.
+    if source_ext == "pdf" and output_format == "txt":
         subprocess.run(
             ["pdftotext", input_path, output_path],
             check=True,

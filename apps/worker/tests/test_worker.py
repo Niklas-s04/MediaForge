@@ -405,7 +405,8 @@ def test_run_document_conversion_uses_libreoffice(monkeypatch, tmp_path):
     assert captured["timeout"] == 77
 
 
-def test_run_document_conversion_extracts_pdf_text(monkeypatch, tmp_path):
+@pytest.mark.parametrize("family", ["pdf", "text"])
+def test_run_document_conversion_extracts_pdf_text(monkeypatch, tmp_path, family):
     input_file = tmp_path / "input.pdf"
     input_file.write_bytes(b"pdf")
     output_file = tmp_path / "result.txt"
@@ -418,7 +419,7 @@ def test_run_document_conversion_extracts_pdf_text(monkeypatch, tmp_path):
 
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
 
-    worker._run_document_conversion(str(input_file), str(output_file), "pdf", "txt")
+    worker._run_document_conversion(str(input_file), str(output_file), family, "txt")
 
     assert captured["cmd"][0] == "pdftotext"
     assert output_file.read_text(encoding="utf-8") == "extracted"
