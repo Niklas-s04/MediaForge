@@ -392,6 +392,32 @@ Before publishing a GitHub release:
 - Build the Docker images from a clean checkout.
 - Start the stack and verify `/health`, the frontend, one download job and one upload conversion.
 
+## Runtime bounds and failure handling
+
+- A broker dispatch failure marks a queued job as failed (`job_dispatch_failed`).
+  Single-job endpoints return HTTP 503 with the job ID; batch responses report
+  each job's persisted status. Uploaded inputs for failed dispatches are removed.
+  An atomic worker claim protects already-running jobs from this cleanup and
+  ignores late or duplicate deliveries for non-queued jobs. Failed dispatches are
+  not automatically retried: submit a new job after the broker recovers.
+- `MEDIA_CONVERT_TIMEOUT_SECONDS` defaults to 21600 (six hours, maximum one day)
+  per FFmpeg invocation. It also covers stalled progress output. Existing Office
+  conversion timeouts remain separate. This is not a total multi-step job limit.
+- Log snapshots read at most 64 KiB. List endpoints accept `limit` from 1 to 500.
+- Download ZIPs use the API's private `TMPDIR`, so startup scratch cleanup removes
+  leftovers after a container restart. They use stored entries to avoid
+  recompressing media and are rejected before packaging if the estimated size
+  exceeds `MALWARE_SCAN_MAX_BYTES`. Input and completed-archive scans remain enabled.
+- Compose accepts `API_MEMORY_LIMIT`, `WORKER_MEMORY_LIMIT`, `REDIS_MEMORY_LIMIT`
+  and matching `*_CPUS` settings. Defaults of 0 preserve the unlimited setting;
+  measure peak usage with representative conversions before setting budgets.
+  TrueNAS custom YAML must receive these settings explicitly; changing `.env`
+  in the source checkout does not change an existing TrueNAS application.
+
+After rebuilding local images, redeploy through TrueNAS (`sudo midclt call -j
+app.redeploy mediaforge`), then verify a real upload, conversion and download.
+Updating a source checkout alone does not update an existing container.
+
 ## Repository Contents
 
 Commit:

@@ -1,5 +1,10 @@
 from sqlmodel import select
 from .models import Job, Flow, FlowRun
+from .log_stream import read_log_tail
+
+
+def bounded_limit(limit: int) -> int:
+    return max(1, min(500, limit))
 
 
 def create_job(session, job_type: str, input_obj: dict) -> Job:
@@ -17,6 +22,7 @@ def get_job(session, job_id: int) -> Job | None:
 
 
 def list_jobs(session, limit: int = 50, include_expired: bool = False):
+    limit = bounded_limit(limit)
     statement = select(Job).order_by(Job.created_at.desc()).limit(limit)
     if not include_expired:
         statement = (
@@ -53,9 +59,7 @@ def read_job_log(job_id: int, max_lines: int = 200):
     path = os.path.join(logdir, f"job-{job_id}.log")
     if not os.path.exists(path):
         return ""
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    return "".join(lines[-max_lines:])
+    return read_log_tail(path, max_lines)
 
 
 def append_flow_log(flow_id: int, text: str):
@@ -73,9 +77,7 @@ def read_flow_log(flow_id: int, max_lines: int = 500):
     path = os.path.join(logdir, f"flow-{flow_id}.log")
     if not os.path.exists(path):
         return ""
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    return "".join(lines[-max_lines:])
+    return read_log_tail(path, max_lines)
 
 
 def create_flow(session, name: str, steps: list, description: str | None = None):
@@ -92,6 +94,7 @@ def get_flow(session, flow_id: int):
 
 
 def list_flows(session, limit: int = 50):
+    limit = bounded_limit(limit)
     statement = select(Flow).order_by(Flow.created_at.desc()).limit(limit)
     return session.exec(statement).all()
 
@@ -111,6 +114,7 @@ def get_flow_run(session, run_id: int):
 
 
 def list_flow_runs(session, flow_id: int, limit: int = 50):
+    limit = bounded_limit(limit)
     statement = select(FlowRun).where(FlowRun.flow_id == flow_id).order_by(FlowRun.started_at.desc()).limit(limit)
     return session.exec(statement).all()
 
@@ -153,6 +157,7 @@ def create_audit_entry(session, username: str | None, profile: str | None, paylo
 
 
 def list_audit_entries(session, limit: int = 100):
+    limit = bounded_limit(limit)
     from .models import AuditEntry
     statement = select(AuditEntry).order_by(AuditEntry.ts.desc()).limit(limit)
     return session.exec(statement).all()

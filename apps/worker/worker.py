@@ -15,6 +15,9 @@ import json
 import re
 import tempfile
 import zipfile
+import signal
+import threading
+from sqlalchemy import update
 from apps.api.app.compression_goals import resolve_compression_family, get_compression_profile
 from apps.api.app.network_security import RemoteUrlPolicyError, validate_remote_url
 from apps.api.app.malware_scan import (
@@ -470,6 +473,31 @@ def _validate_media_command_encoders(cmd: list[str]):
         raise RuntimeError(f"FFmpeg encoder nicht verfuegbar: {unique}")
 
 
+def _media_timeout() -> int:
+    try:
+        return max(1, min(86400, int(os.environ.get("MEDIA_CONVERT_TIMEOUT_SECONDS", "21600"))))
+    except ValueError:
+        return 21600
+
+
+def _kill_media_process(process):
+    if process.poll() is None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+
+def _claim_job(session, job_id):
+    result = session.execute(update(Job).where(Job.id == job_id, Job.status == "queued").values(
+        status="running", started_at=datetime.datetime.utcnow()))
+    session.commit()
+    return bool(result.rowcount)
+
+
 def _run_ffmpeg_with_progress(
     cmd: list[str],
     *,
@@ -484,7 +512,7 @@ def _run_ffmpeg_with_progress(
     _validate_media_command_encoders(cmd)
     _set_job_progress(session, job, start_progress, f"{step} - Restzeit wird berechnet", force=True)
     if not duration:
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=_media_timeout())
         _set_job_progress(session, job, end_progress, step, force=True)
         return
 
@@ -496,7 +524,17 @@ def _run_ffmpeg_with_progress(
         stderr=subprocess.DEVNULL,
         text=True,
         bufsize=1,
+        start_new_session=(os.name == "posix"),
     )
+    timed_out = threading.Event()
+    timeout = _media_timeout()
+    def expire():
+        if process.poll() is None:
+            timed_out.set()
+            _kill_media_process(process)
+    watchdog = threading.Timer(timeout, expire)
+    watchdog.daemon = True
+    watchdog.start()
     last_update = 0.0
     out_time = 0.0
     assert process.stdout is not None
@@ -519,10 +557,13 @@ def _run_ffmpeg_with_progress(
 
         return_code = process.wait()
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        watchdog.cancel()
+        watchdog.join()
+        _kill_media_process(process)
+        process.wait()
         process.stdout.close()
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(progress_cmd, timeout)
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, progress_cmd)
     _set_job_progress(session, job, end_progress, step, force=True)
@@ -694,6 +735,7 @@ def _run_image_to_pdf_conversion(input_path: str, output_path: str):
             ["ffmpeg", "-y", "-i", input_path, "-frames:v", "1", pdf_input],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=_media_timeout(),
         )
 
     try:
@@ -716,7 +758,7 @@ def _run_svg_to_image_conversion(input_path: str, output_path: str, output_forma
         )
         cmd = _build_media_command(raster_input, output_path, "image", output_format, quality, strip_metadata, options)
         _validate_media_command_encoders(cmd)
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=_media_timeout())
 
 
 def _run_image_vectorization(input_path: str, output_path: str):
@@ -739,6 +781,7 @@ def _run_image_vectorization(input_path: str, output_path: str):
             ["ffmpeg", "-y", "-i", input_path, "-frames:v", "1", vector_input],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=_media_timeout(),
         )
     try:
         vtracer.convert_image_to_svg_py(vector_input, output_path)
@@ -811,7 +854,7 @@ def _run_pdf_to_image_zip(
                 else:
                     cmd = _build_media_command(page_path, page_output, "image", output_format, quality, strip_metadata, options)
                     _validate_media_command_encoders(cmd)
-                    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=_media_timeout())
                 converted.append(page_output)
 
         zip_stem = stem or _safe_stem(input_path, "pdf")
@@ -1013,6 +1056,8 @@ def process_download_and_convert(self, job_id: int):
             job = session.exec(stmt).first()
             if not job:
                 _log(job_id, "Job not found in DB")
+                return
+            if not _claim_job(session, job_id):
                 return
             # mark started
             job.status = 'running'
@@ -1216,6 +1261,8 @@ def process_convert(self, job_id: int):
                 _log(job_id, "Job not found in DB")
                 return
 
+            if not _claim_job(session, job_id):
+                return
             job.status = "running"
             job.started_at = datetime.datetime.utcnow()
             _set_job_progress(session, job, 5, "Datei vorbereiten", force=True)

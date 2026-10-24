@@ -3,6 +3,20 @@ import codecs
 import os
 
 
+def read_log_tail(path: str, max_lines: int, max_bytes: int = 65536) -> str:
+    if max_lines <= 0:
+        return ""
+    try:
+        with open(path, "rb") as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - max_bytes))
+            data = source.read(max_bytes)
+        # A byte boundary may split a UTF-8 character. Omit only that fragment.
+        return "".join(data.decode("utf-8", errors="ignore").splitlines(keepends=True)[-max_lines:])
+    except FileNotFoundError:
+        return ""
+
+
 def read_log_chunk(path: str, offset: int) -> tuple[str, int, bool]:
     try:
         with open(path, "rb") as source:

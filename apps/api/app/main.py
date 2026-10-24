@@ -1,6 +1,7 @@
 from .compression import normalize_compression
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form, Query
+from typing import Annotated
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.background import BackgroundTask
@@ -11,7 +12,7 @@ from .schemas import JobCreate, JobRead, FlowCreate, FlowRead, FlowRunRead
 from .celery_app import celery_app
 from sqlmodel import Session, select
 from datetime import datetime, timedelta
-from sqlalchemy import text
+from sqlalchemy import text, update
 import os
 import time
 import json
@@ -237,9 +238,7 @@ def expire_old_job_outputs(session: Session, now: datetime | None = None) -> int
 
         job.status = "expired"
         job.output_path = None
-        job.current_step = "Ausgabedatei nach 24h geloescht"
-        job.current_step = "Ausgabedatei nach 24h gelöscht"
-        job.current_step = "Ausgabedatei nach 24h geloescht"
+        job.current_step = "Ausgabedatei nach Ablauf der Aufbewahrungsfrist gelöscht"
         session.add(job)
         expired += 1
 
@@ -715,6 +714,33 @@ def dispatch_job(job: models.Job):
         raise HTTPException(status_code=400, detail=f"Unsupported job type '{job.type}'")
 
 
+def dispatch_or_fail(session: Session, job: models.Job) -> bool:
+    try:
+        dispatch_job(job)
+        return True
+    except Exception:
+        logger.exception("Failed to dispatch worker task for job %s", job.id)
+        # A broker error can arrive after delivery. Race atomically with the
+        # worker's queued -> running claim; never delete an active job's input.
+        result = session.execute(update(models.Job).where(
+            models.Job.id == job.id, models.Job.status == "queued"
+        ).values(status="failed", error_message="job_dispatch_failed",
+                 current_step="Auftrag konnte nicht zugestellt werden", finished_at=datetime.utcnow()))
+        session.commit()
+        session.refresh(job)
+        if result.rowcount:
+            source = (job.input or {}).get("file_path")
+            if source and (job.input or {}).get("source") == "upload" and is_path_inside(get_upload_dir(), source):
+                try:
+                    os.remove(source)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.exception("Failed to remove undispatched upload for job %s", job.id)
+            return False
+        return job.status in {"running", "success"}
+
+
 def on_startup():
     create_db_and_tables()
     ensure_job_retention_columns()
@@ -789,14 +815,8 @@ def create_job(
 
     job = crud.create_job(session, req.type, input_obj)
 
-    # Dispatch worker task to process this job
-    try:
-        dispatch_job(job)
-    except HTTPException:
-        raise
-    except Exception:
-        # If dispatch fails, keep job in queued state
-        logger.exception("Failed to dispatch worker task for job %s", job.id)
+    if not dispatch_or_fail(session, job):
+        raise HTTPException(status_code=503, detail={"code": "job_dispatch_failed", "job_id": job.id})
 
     return JobRead(
         id=job.id,
@@ -890,10 +910,8 @@ def create_convert_upload_job(
     input_obj["file_path"] = upload_path
     job = crud.create_job(session, "convert", input_obj)
 
-    try:
-        dispatch_job(job)
-    except Exception:
-        logger.exception("Failed to dispatch worker task for job %s", job.id)
+    if not dispatch_or_fail(session, job):
+        raise HTTPException(status_code=503, detail={"code": "job_dispatch_failed", "job_id": job.id})
 
     return JobRead(
         id=job.id,
@@ -1041,10 +1059,7 @@ def create_convert_batch_jobs(
         raise
 
     for job in jobs:
-        try:
-            dispatch_job(job)
-        except Exception:
-            logger.exception("Failed to dispatch worker task for batch job %s", job.id)
+        dispatch_or_fail(session, job)
 
     return {
         "batch_id": batch_id,
@@ -1111,6 +1126,19 @@ def download_job_output(
     )
 
 
+def check_archive_budget(paths: list[str]):
+    try:
+        limit = max(1, int(os.environ.get("MALWARE_SCAN_MAX_BYTES", "2147483648")))
+    except ValueError:
+        limit = 2147483648
+    # Stored ZIP entries have predictable size; leave room for headers, UTF-8
+    # names and ZIP64 records. The final archive is still scanned fail-closed.
+    estimated = 1024 + sum(os.path.getsize(path) + 512 +
+                           2 * len(os.path.basename(path).encode("utf-8")) for path in paths)
+    if estimated > limit:
+        raise HTTPException(status_code=413, detail="archive_size_limit_exceeded")
+
+
 @app.get("/api/history/download")
 def download_history_output(
     session: Session = Depends(get_session),
@@ -1138,16 +1166,16 @@ def download_history_output(
     if not output_paths:
         raise HTTPException(status_code=404, detail="History has no finished output files")
 
+    check_archive_budget(output_paths)
     archive = tempfile.NamedTemporaryFile(
         prefix="mediaforge-history-",
         suffix=".zip",
-        dir=output_dir,
         delete=False,
     )
     archive_path = archive.name
     archive.close()
     try:
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as bundle:
             used_names: set[str] = set()
             for output_path in output_paths:
                 original_name = os.path.basename(output_path)
@@ -1240,16 +1268,16 @@ def download_batch_output(
     if not output_paths:
         raise HTTPException(status_code=404, detail="Batch has no finished output files")
 
+    check_archive_budget(output_paths)
     archive = tempfile.NamedTemporaryFile(
         prefix="mediaforge-batch-",
         suffix=".zip",
-        dir=output_dir,
         delete=False,
     )
     archive_path = archive.name
     archive.close()
     try:
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as bundle:
             used_names: set[str] = set()
             for output_path in output_paths:
                 name = os.path.basename(output_path)
@@ -1379,7 +1407,7 @@ def job_events(
 
 @app.get("/api/jobs")
 def list_jobs(
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     include_expired: bool = False,
     session: Session = Depends(get_session),
 ):
@@ -1486,7 +1514,7 @@ def api_get_profile(
 
 @app.get("/api/audit")
 def api_list_audit(
-    limit: int = 100,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     session: Session = Depends(get_session),
 ):
     return crud.list_audit_entries(session, limit=limit)
@@ -1550,7 +1578,7 @@ def run_flow_endpoint(
 @app.get("/api/flows/{flow_id}/runs")
 def list_flow_runs_endpoint(
     flow_id: int,
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: Session = Depends(get_session),
 ):
     runs = crud.list_flow_runs(session, flow_id, limit=limit)

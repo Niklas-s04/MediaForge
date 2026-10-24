@@ -5,6 +5,8 @@ services:
       context: ..
       dockerfile: apps/api/Dockerfile
     container_name: nas_convert_api
+    mem_limit: ${API_MEMORY_LIMIT:-0}
+    cpus: ${API_CPUS:-0}
     restart: unless-stopped
     ports:
       - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8787}:8787"
@@ -54,6 +56,8 @@ services:
       context: ..
       dockerfile: apps/worker/Dockerfile
     container_name: nas_convert_worker
+    mem_limit: ${WORKER_MEMORY_LIMIT:-0}
+    cpus: ${WORKER_CPUS:-0}
     restart: unless-stopped
     environment:
       - TZ=${TZ:-Europe/Berlin}
@@ -65,6 +69,7 @@ services:
       - REMOTE_DOWNLOAD_MAX_BYTES=${REMOTE_DOWNLOAD_MAX_BYTES:-2147483648}
       - OUTPUT_RETENTION_HOURS=${OUTPUT_RETENTION_HOURS:-24}
       - DOCUMENT_CONVERT_TIMEOUT_SECONDS=${DOCUMENT_CONVERT_TIMEOUT_SECONDS:-120}
+      - MEDIA_CONVERT_TIMEOUT_SECONDS=${MEDIA_CONVERT_TIMEOUT_SECONDS:-21600}
       - MALWARE_SCAN_ENABLED=${MALWARE_SCAN_ENABLED:-true}
       - CLAMAV_HOST=clamav
       - CLAMAV_PORT=3310
@@ -132,6 +137,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: nas_convert_redis
+    mem_limit: ${REDIS_MEMORY_LIMIT:-0}
+    cpus: ${REDIS_CPUS:-0}
     restart: unless-stopped
     # The official entrypoint only switches users when started as root. Starting
     # as redis avoids requiring SETUID/SETGID capabilities with cap_drop: ALL.

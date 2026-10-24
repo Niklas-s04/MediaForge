@@ -156,7 +156,8 @@ def test_process_download_and_convert_success(monkeypatch, tmp_path):
     def fake_run(cmd, check, stdout, stderr, timeout):
         return None
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         output_dir.mkdir(parents=True, exist_ok=True)
         Path(cmd[-1]).write_bytes(b"fake-mp3")
         return 0
@@ -237,7 +238,8 @@ def test_process_download_and_convert_video_options(monkeypatch, tmp_path):
     def fake_run(cmd, check, stdout, stderr, timeout):
         return None
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         captured["ffmpeg_cmd"] = cmd
         output_dir.mkdir(parents=True, exist_ok=True)
         Path(cmd[-1]).write_bytes(b"fake-webm")
@@ -457,7 +459,8 @@ def test_run_image_to_pdf_conversion_rasterizes_other_image_formats(monkeypatch,
     output_file = tmp_path / "out" / "photo.pdf"
     captured = {}
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         captured["ffmpeg_cmd"] = cmd
         Path(cmd[-1]).write_bytes(b"png")
         return 0
@@ -501,7 +504,8 @@ def test_run_image_vectorization_rasterizes_non_jpg_png_inputs(monkeypatch, tmp_
     output_file = tmp_path / "out" / "photo.svg"
     captured = {}
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         captured["ffmpeg_cmd"] = cmd
         Path(cmd[-1]).write_bytes(b"png")
         return 0
@@ -531,7 +535,8 @@ def test_run_svg_to_image_conversion_renders_before_media_command(monkeypatch, t
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"png")
         return types.SimpleNamespace(returncode=0)
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         captured["ffmpeg_cmd"] = cmd
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"out")
@@ -685,7 +690,8 @@ def test_process_convert_success(monkeypatch, tmp_path):
 
     expected_output = output_dir / "sample.mp3"
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         output_dir.mkdir(parents=True, exist_ok=True)
         Path(cmd[-1]).write_bytes(b"fake-mp3")
         return 0
@@ -779,7 +785,8 @@ def test_process_convert_failure_cleans_uploaded_source(monkeypatch, tmp_path):
         session.refresh(job)
         job_id = job.id
 
-    def fake_check_call(cmd, stdout, stderr):
+    def fake_check_call(cmd, stdout, stderr, timeout):
+        assert timeout > 0
         raise RuntimeError("ffmpeg failed")
 
     monkeypatch.setattr(worker.subprocess, "check_call", fake_check_call)
